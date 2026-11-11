@@ -1,0 +1,18 @@
+{
+  "name": "pending-questions",
+  "version": "0.1.0",
+  "description": "Keeps the questions the agent asks you in a side pane, with when they were asked, until you answer them there or in the chat.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "RTeran"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/RTeran/pending-questions#readme",
+  "repository": "https://github.com/RTeran/pending-questions",
+  "keywords": [
+    "claude-code-mod",
+    "questions",
+    "agent-teams",
+    "pane"
+  ]
+}
