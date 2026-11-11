@@ -288,7 +288,7 @@ export const register: Register = on => {
     return {
       result: `Registered as Q${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until answered. Refer to it as Q${n}.`,
     }
-  })
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
 
   on('tool.call', { tool: CLOSE_TOOL }, async ($, e) => {
     const { n } = e as unknown as CloseInput
@@ -298,14 +298,14 @@ export const register: Register = on => {
     await update($, view, current => (current.kind === 'question' && current.n === n ? LIST : current))
     await save($)
     return { result: `Q${n} removed from the pane.` }
-  })
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
 
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
     const n = e.command || !ANSWER_ORIGINS.has(e.origin.kind) ? undefined : answeredRef(e.text)
     if (n !== undefined) await resolveQuestion($, n)
     return result
-  })
+  }).catch(($, e, next) => next(e))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
