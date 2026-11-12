@@ -25,6 +25,7 @@ const PANE = {
 const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') => {
   const submitted: string[] = []
   const tools: string[] = []
+  const commands: string[] = []
   on('process.run', () => ({
     value: { exitCode: 0, stdout: probe, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
   }))
@@ -33,7 +34,10 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') 
   const clock = mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  on('command.register', () => ({ value: { command: 'preguntas' } }))
+  on('command.register', (_, e) => {
+    commands.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('tool.register', (_, e) => {
     tools.push(e.name)
     return { value: { tool: e.name } }
@@ -45,7 +49,7 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') 
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { submitted, clock, tools }
+  return { submitted, clock, tools, commands }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -75,6 +79,15 @@ describe('helpers', () => {
     expect(answeredRef('  [Q12] ok')).toBe(12)
     expect(answeredRef('see Q3')).toBeUndefined()
   })
+})
+
+test('/questions opens the pane', async ($, on) => {
+  const { commands } = engine(on)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  expect(commands).toEqual(['questions'])
+
+  const ran = await $.command.run({ command: 'questions' })
+  expect(ran.text).toBe('No hay preguntas pendientes.')
 })
 
 test('a question is answered from the pane and leaves it', async ($, on) => {

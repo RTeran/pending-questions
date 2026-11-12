@@ -12,7 +12,7 @@ questions get lost. This Claude Code mod keeps every open question in a side pan
 - **Enviar** sends it as a new turn once the agent is idle. **Enviar ya (al chat)** puts it in the
   prompt box, so pressing Enter delivers it into the agent's running turn.
 - An answer typed in the chat that starts with `[Q3` closes the question too.
-- `question_close` removes a question that no longer matters. `/preguntas` opens the pane.
+- `question_close` removes a question that no longer matters. `/questions` opens the pane.
 
 The pane's texts are in Spanish.
 
@@ -46,7 +46,7 @@ marketplace with `RTeran/pending-questions`, then Add plugin.
 
 ## Notes
 
-- The pane opens by itself only when the terminal is at least 144 columns wide; `/preguntas` opens
+- The pane opens by itself only when the terminal is at least 144 columns wide; `/questions` opens
   it at any width.
 - Open questions are kept per session, so they survive a reload and a resume.
 - Mouse clicks inside tmux need `set -g mouse on`; otherwise use `ctrl+x tab` to enter the pane, the
