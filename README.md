@@ -5,6 +5,9 @@ questions get lost. This Claude Code mod keeps every open question in a side pan
 
 - The agent registers each question with the `question_open` tool: the question, the context you
   need to answer it, the options and the one it recommends.
+- Only secondary questions go to the pane: ones the agent can keep working without. A question
+  it cannot go on without still goes through `AskUserQuestion`, which stops the session until
+  you answer.
 - The pane lists the open questions with the date and time each was asked, how long ago, and a
   separator for each day when the session runs over several days.
 - Open a question to see its context, pick an option (it stays marked) or write your own answer,
