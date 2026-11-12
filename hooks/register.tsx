@@ -192,7 +192,8 @@ export const register: Register = on => {
       name: 'question_open',
       description: [
         'Register a question for the human in the "pending questions" side pane.',
-        'Call it for every decision you need from the human, then keep working on whatever does not depend on the answer.',
+        'Use it only for secondary questions: ones you can keep working without, because the answer refines the result but blocks no step you are about to take. Register it, then keep working on whatever does not depend on the answer.',
+        'A question you cannot go on without, or whose answer would change what you are about to do, is not secondary: ask it with AskUserQuestion, which stops the session until the human answers, and do not register it here as well.',
         'The pane keeps the question, with the date and time it was asked, until the human answers.',
         'The answer arrives as a user message starting with "[Q<n> · preguntada <date>]"; it may arrive while you are busy with something else.',
         'Mention the returned Q<n> when you refer to the question in your replies.',
