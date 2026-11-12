@@ -110,7 +110,7 @@ let seqKey = 'seq'
 async function save($: Engine) {
   const list = await read($, questions)
   await $.store.set(storeKey, list)
-  $.ui.status(list.length === 0 ? undefined : `❓ ${list.length} ${list.length === 1 ? 'pregunta pendiente' : 'preguntas pendientes'} · /preguntas`)
+  $.ui.status(list.length === 0 ? undefined : `❓ ${list.length} ${list.length === 1 ? 'pregunta pendiente' : 'preguntas pendientes'} · /questions`)
 }
 
 async function resolveQuestion($: Engine, n: number) {
@@ -235,7 +235,7 @@ export const register: Register = on => {
       isDeferred: false,
     })
 
-    await $.command.register({ name: 'preguntas', description: 'Abre el panel de preguntas pendientes' })
+    await $.command.register({ name: 'questions', description: 'Abre el panel de preguntas pendientes' })
 
     if ((await read($, questions)).length === 0) {
       const stored = await $.store.get(storeKey)
@@ -250,7 +250,7 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'preguntas' }, async $ => {
+  on('command.run', { command: 'questions' }, async $ => {
     await update($, view, () => LIST)
     await $.ui.open({ id: PANE, title: TITLE })
     const count = (await read($, questions)).length
