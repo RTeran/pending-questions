@@ -399,14 +399,16 @@ export const register: Register = on => {
             {showDays && <Text dimColor>── {group.label} ──</Text>}
             {group.items.map(q => (
               <Box flexDirection="column">
-                <Button key={`q-${q.n}`} plain onPress={() => void update($, view, () => ({ kind: 'question', n: q.n }) as View)}>
+                <Text>
                   Q{q.n} · {clockOf(q.askedAt)}{' '}
                   <Text dimColor>
                     · {ageOf(q.askedAt, at)}
                     {q.queuedAt ? ' · ⏳ en cola' : ''}
                   </Text>
+                </Text>
+                <Button key={`q-${q.n}`} plain onPress={() => void update($, view, () => ({ kind: 'question', n: q.n }) as View)}>
+                  {q.question}
                 </Button>
-                <Text>{q.question}</Text>
               </Box>
             ))}
           </Box>
