@@ -407,7 +407,7 @@ export const register: Register = on => {
                   </Text>
                 </Text>
                 <Button key={`q-${q.n}`} plain onPress={() => void update($, view, () => ({ kind: 'question', n: q.n }) as View)}>
-                  {q.question}
+                  <Text wrap="wrap">{q.question}</Text>
                 </Button>
               </Box>
             ))}
