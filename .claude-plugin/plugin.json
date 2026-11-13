@@ -1,6 +1,6 @@
 {
   "name": "pending-questions",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Keeps the questions the agent asks you in a side pane, with when they were asked, until you answer them there or in the chat.",
   "types": "./types/index.d.ts",
   "author": {
