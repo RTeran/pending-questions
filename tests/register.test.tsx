@@ -104,7 +104,7 @@ test('a question is answered from the pane and leaves it', async ($, on) => {
   expect(String(opened.result)).toMatch(/^Registered as Q1, asked /)
 
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ type: 'Text', text: /Añado la dependencia/ }))?.text).toBe('¿Añado la dependencia X?')
+  expect((await ui.find({ type: 'Button', text: /Añado la dependencia/ }))?.text).toBe('¿Añado la dependencia X?')
 
   await ui.press({ key: 'q-1' })
   expect((await ui.find({ type: 'Text', text: /Hace falta/ }))?.text).toBe('Hace falta para parsear fechas.')
@@ -119,6 +119,24 @@ test('a question is answered from the pane and leaves it', async ($, on) => {
   await ui.unmount()
 })
 
+test('the list opens a question from its title, not from its date', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: OPEN, question: '¿Borro la rama vieja?' })
+
+  const ui = await $.ui.mount(PANE)
+  const buttons = await ui.findAll({ type: 'Button' })
+  expect(buttons).toHaveLength(1)
+  expect(buttons[0]?.key).toBe('q-1')
+  expect(buttons[0]?.text).toBe('¿Borro la rama vieja?')
+  expect(await ui.find({ type: 'Button', text: /\d{2}:\d{2}/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Q1 · \d{2}:\d{2}/ })).toBeDefined()
+
+  await ui.press({ key: 'q-1' })
+  expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('an answer typed in the chat closes its question', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
@@ -128,8 +146,8 @@ test('an answer typed in the chat closes its question', async ($, on) => {
   await $.prompt.submit({ text: '[Q1 · preguntada 11/11/2026 10:42] vale', wait: false, origin: { kind: 'composer' } })
 
   const ui = await $.ui.mount(PANE)
-  expect(await ui.find({ type: 'Text', text: /^one$/ })).toBeUndefined()
-  expect((await ui.find({ type: 'Text', text: /^two$/ }))?.text).toBe('two')
+  expect(await ui.find({ type: 'Button', text: /^one$/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Button', text: /^two$/ }))?.text).toBe('two')
   await ui.unmount()
 })
 
@@ -174,7 +192,7 @@ test('a message from a peer does not close a question', async ($, on) => {
   await $.prompt.submit({ text: '[Q1] from a peer', wait: false, origin: { kind: 'peer' } as never })
 
   const ui = await $.ui.mount(PANE)
-  expect((await ui.find({ type: 'Text', text: /^one$/ }))?.text).toBe('one')
+  expect((await ui.find({ type: 'Button', text: /^one$/ }))?.text).toBe('one')
   await ui.unmount()
 })
 
