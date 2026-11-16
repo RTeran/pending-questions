@@ -4,6 +4,7 @@ import type { On } from 'claude-code'
 import {
   ACK_SOUND,
   answeredRef,
+  ding,
   answerTextOf,
   dayLabelOf,
   detailRows,
@@ -36,8 +37,9 @@ const PANE = {
 const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n', playFails = false) => {
   const submitted: string[] = []
   const plays: unknown[] = []
-  on('audio.play', (_, e) => {
+  on('audio.play', async (_, e) => {
     plays.push(e.clip)
+    await Promise.resolve()
     if (playFails) throw new Error('no audio device')
     return { value: undefined }
   })
@@ -250,6 +252,8 @@ describe('scrollbar helpers', () => {
   test('there is no thumb while the content fits', async () => {
     expect(thumbOf({ offset: 0, bodyRows: 10, contentRows: 10 })).toBeUndefined()
     expect(thumbOf({ offset: 0, bodyRows: 10, contentRows: 4 })).toBeUndefined()
+    expect(thumbOf({ offset: 0, bodyRows: 0, contentRows: 4 })).toBeUndefined()
+    expect(thumbOf({ offset: 0, bodyRows: -1, contentRows: 4 })).toBeUndefined()
   })
 
   test('the thumb is as long as the share of the content that shows', async () => {
@@ -270,6 +274,8 @@ describe('scrollbar helpers', () => {
     expect(rowsOf('one two three', 7)).toBe(2)
     expect(rowsOf('one\ntwo', 10)).toBe(2)
     expect(rowsOf('abcdefghijkl', 5)).toBe(3)
+    expect(rowsOf('ab abcdefghijkl', 5)).toBe(3)
+    expect(rowsOf('a bcdef g', 5)).toBe(3)
   })
 
   test('the list height counts each question, its header and the gaps between them', async () => {
@@ -279,6 +285,12 @@ describe('scrollbar helpers', () => {
     expect(listRows([question(1, asked), question(2, asked)], at, 60)).toBe(5)
     const yesterday = new Date(2026, 10, 10, 11, 0).toISOString()
     expect(listRows([question(1, yesterday), question(2, asked)], at, 60)).toBe(9)
+  })
+
+  test('a queued answer replaces the answer field with one line', async () => {
+    const at = new Date(2026, 10, 11, 12, 0)
+    const q = question(1, new Date(2026, 10, 11, 11, 0).toISOString())
+    expect(detailRows({ ...q, queuedAt: new Date(2026, 10, 11, 11, 30).toISOString() }, at, 60)).toBe(6)
   })
 
   test('the detail height grows with the context and the options', async () => {
@@ -390,6 +402,19 @@ describe('sound', () => {
     expect(bytes.length).toBeLessThan(40_000)
   })
 
+  test('the WAV header matches the samples it carries', async () => {
+    const raw = Uint8Array.from(atob(ACK_SOUND.base64), c => c.charCodeAt(0))
+    const data = new DataView(raw.buffer)
+    expect(data.getUint32(4, true)).toBe(raw.length - 8)
+    expect(data.getUint32(40, true)).toBe(raw.length - 44)
+    expect(data.getUint16(20, true)).toBe(1)
+    expect(data.getUint16(22, true)).toBe(1)
+    expect(data.getUint32(24, true)).toBe(22_050)
+    expect(data.getUint16(34, true)).toBe(16)
+    const samples = Array.from({ length: (raw.length - 44) / 2 }, (_, i) => data.getInt16(44 + i * 2, true))
+    expect(samples.some(v => v !== 0)).toBe(true)
+  })
+
   test('a new question plays the sound once', async ($, on) => {
     const { plays } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
@@ -417,12 +442,54 @@ describe('sound', () => {
     expect(plays).toHaveLength(before)
   })
 
-  test('a denied question plays no sound', async ($, on) => {
+  test('a question from a subagent plays no sound', async ($, on) => {
     const { plays } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'mine', agentId: 'impl-1' })
+    expect(plays).toEqual([])
+  })
+
+  test('an empty question plays no sound', async ($, on) => {
+    const { plays } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: '   ' })
     expect(plays).toEqual([])
+  })
+
+  test('questions less than a second apart play one sound', async ($, on) => {
+    const { plays, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(500)
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(plays).toHaveLength(1)
+  })
+
+  test('a question more than a second after the last sound plays again', async ($, on) => {
+    const { plays, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(1_001)
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(plays).toHaveLength(2)
+  })
+
+  test('a player that throws at once is logged and does not throw', async () => {
+    const logged: string[] = []
+    const $ = {
+      clock: { now: async () => 1e15 },
+      audio: {
+        play: () => {
+          throw new Error('no audio noun')
+        },
+      },
+      ui: { log: (text: string) => void logged.push(text) },
+    }
+    await ding($ as never)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toMatch(/no audio noun/)
   })
 
   test('a sound that cannot play still registers the question', async ($, on) => {
@@ -438,5 +505,32 @@ describe('sound', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'one' })
     expect(plays).toEqual([])
+  })
+})
+
+describe('scrollbar cache', () => {
+  test('a redraw at another width estimates again', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    await $.ui.scroll(scrolled(12, 5, 40))
+    await ui.redraw({ ...sized(5, 12).props, bodyColumns: 50 })
+    expect(await thumbRows(ui)).toEqual([4])
+    await ui.unmount()
+  })
+
+  test('opening a question ignores the height cached for the list', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    await $.ui.scroll(scrolled(12, 5, 40))
+    await ui.redraw(sized(5, 0).props)
+    await ui.press({ key: 'q-1' })
+    expect(await thumbRows(ui)).toEqual([0, 1, 2])
+    await ui.unmount()
   })
 })

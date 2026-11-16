@@ -95,9 +95,12 @@ const lineRows = (line: string, columns: number) => {
       used = needed
       continue
     }
-    if (used > 0) rows++
-    rows += Math.max(0, Math.ceil(length / columns) - 1)
-    used = length % columns || (length === 0 ? 0 : columns)
+    const room = used === 0 || length <= columns ? 0 : columns - used - 1
+    const fromHere = room > 0 ? Math.ceil((length - room) / columns) : Infinity
+    const fromNext = (used > 0 ? 1 : 0) + Math.ceil(length / columns) - 1
+    const tail = fromHere <= fromNext ? length - room : length
+    rows += Math.min(fromHere, fromNext)
+    used = tail % columns || columns
   }
   return rows
 }
@@ -212,11 +215,21 @@ export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav'
 const SOUND_GAP_MS = 1_000
 let lastSoundAt = -Infinity
 
-function ding($: Engine) {
-  const at = Date.now()
-  if (at - lastSoundAt < SOUND_GAP_MS) return
-  lastSoundAt = at
-  void $.audio.play(ACK_SOUND).catch(() => {})
+const logSoundFailure = ($: Engine, error: unknown) =>
+  $.ui.log(`pending-questions: the new-question sound did not play: ${String(error)}`, { to: 'debug' })
+
+export async function ding($: Engine) {
+  try {
+    const at = await $.clock.now()
+    if (at - lastSoundAt < SOUND_GAP_MS) return
+    lastSoundAt = at
+  } catch (error) {
+    logSoundFailure($, error)
+    return
+  }
+  void Promise.resolve()
+    .then(() => $.audio.play(ACK_SOUND))
+    .catch(error => logSoundFailure($, error))
 }
 
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
@@ -404,7 +417,7 @@ export const register: Register = (on, options) => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
-    if (isSoundOn) ding($)
+    if (isSoundOn) await ding($)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return {
@@ -430,16 +443,12 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
-    const result = await next(e)
     const key = drawnKey
+    const result = await next(e)
     if (key === '') return result
-    try {
-      const cached = await read($, scroll)
-      if (cached.key !== key || cached.contentRows !== e.contentRows) {
-        await update($, scroll, () => ({ key, contentRows: e.contentRows }))
-      }
-    } catch {
-      // The bar falls back to the estimate; the scroll itself already happened.
+    const cached = await read($, scroll)
+    if (cached.key !== key || cached.contentRows !== e.contentRows) {
+      await update($, scroll, () => ({ key, contentRows: e.contentRows }))
     }
     return result
   })
