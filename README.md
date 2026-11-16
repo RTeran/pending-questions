@@ -11,13 +11,14 @@ questions get lost. This Claude Code mod keeps every open question in a side pan
 - The pane lists the open questions with the date and time each was asked, how long ago, and a
   separator for each day when the session runs over several days.
 - Open a question to see its context, pick an option (it stays marked) or write your own answer,
-  and send it. The answer reaches the agent as `[Q3 · preguntada 11/11/2026 10:42] your answer`.
-- **Enviar** sends it as a new turn once the agent is idle. **Enviar ya (al chat)** puts it in the
+  and send it. The answer reaches the agent as `[Q3 · asked 2026-11-11 10:42] your answer`.
+- **Send** sends it as a new turn once the agent is idle. **Send now (to chat)** puts it in the
   prompt box, so pressing Enter delivers it into the agent's running turn.
 - An answer typed in the chat that starts with `[Q3` closes the question too.
 - `question_close` removes a question that no longer matters. `/questions` opens the pane.
 
-The pane's texts are in Spanish.
+The pane's texts are in English. The agent writes each question, its context and its options in
+the language you use.
 
 ## Agent teams and subagents
 
