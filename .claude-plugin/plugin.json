@@ -1,7 +1,7 @@
 {
   "name": "pending-questions",
-  "version": "0.3.0",
-  "description": "Keeps the questions the agent asks you in a side pane, with when they were asked, until you answer them there or in the chat.",
+  "version": "0.4.0",
+  "description": "An agent inbox side pane: the questions the agent asks you, its task list and the actions only you can do, kept until you deal with them.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "RTeran"
@@ -13,13 +13,16 @@
     "claude-code-mod",
     "questions",
     "agent-teams",
-    "pane"
+    "pane",
+    "tasks",
+    "actions",
+    "inbox"
   ],
   "userConfig": {
     "sound": {
       "type": "string",
-      "title": "Sound on new questions",
-      "description": "What plays when the agent registers a new pending question, on macOS: alert, the macOS alert sound; ding, a short built-in tone; off, nothing.",
+      "title": "Sound on new items",
+      "description": "What plays when the agent registers a new question or action, or the task list changes, on macOS: alert, the macOS alert sound; ding, a short built-in tone; off, nothing.",
       "options": [
         "alert",
         "ding",
@@ -30,7 +33,7 @@
     "tasksFile": {
       "type": "string",
       "title": "Tasks file",
-      "description": "The file the agent keeps its task list in, relative to the project root or absolute. Empty means TASKS.md at the project root. A path picked in the pane for a project wins over this.",
+      "description": "The file the agent keeps its task list in, relative to the project root, absolute or starting with ~. Empty means TASKS.md at the project root. A path picked in the pane for a project wins over this.",
       "default": ""
     }
   }

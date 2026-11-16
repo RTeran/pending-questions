@@ -1,14 +1,16 @@
 {
   "name": "rteran-pending-questions",
-  "owner": { "name": "RTeran" },
+  "owner": {
+    "name": "RTeran"
+  },
   "plugins": [
     {
       "name": "pending-questions",
       "source": "./",
-      "description": "Keeps the questions the agent asks you in a side pane, with when they were asked, until you answer them.",
-      "version": "0.3.0",
+      "description": "An agent inbox side pane: the questions the agent asks you, its task list and the actions only you can do, kept until you deal with them.",
+      "version": "0.4.0",
       "category": "productivity"
     }
   ],
-  "description": "One plugin: a side pane of the agent's pending questions for Claude Code."
+  "description": "One plugin: an agent inbox side pane for Claude Code, with the agent's questions, tasks and actions."
 }
