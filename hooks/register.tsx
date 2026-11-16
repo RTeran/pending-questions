@@ -139,6 +139,28 @@ const lineRows = (line: string, columns: number) => {
 export const rowsOf = (text: string, columns: number) =>
   text.split('\n').reduce((sum, line) => sum + lineRows(line, Math.max(1, columns)), 0)
 
+const isWide = (char: string) => {
+  const code = char.codePointAt(0) ?? 0
+  return code >= 0x1f000 || (code >= 0x2600 && code <= 0x27bf)
+}
+
+export const widthOf = (text: string) => [...text].reduce((sum, char) => sum + (isWide(char) ? 2 : 1), 0)
+
+export const navRowsOf = (labels: readonly string[], columns: number, gap = 2) => {
+  let rows = 1
+  let used = 0
+  for (const label of labels) {
+    const width = Math.min(widthOf(label), columns)
+    if (used > 0 && used + gap + width > columns) {
+      rows += 1
+      used = width
+    } else {
+      used += (used > 0 ? gap : 0) + width
+    }
+  }
+  return rows
+}
+
 const stackRows = (children: readonly number[]) =>
   children.length === 0 ? 0 : children.reduce((sum, rows) => sum + rows, 0) + children.length - 1
 
@@ -1367,14 +1389,42 @@ export const register: Register = (on, options) => {
     const cached = await read($, scroll)
     const columns = Math.max(1, e.props.bodyColumns - 1)
 
-    const withScrollbar = (key: string, estimate: number, content: RenderNode) => {
+    const withScrollbar = (
+      key: string,
+      estimate: number,
+      content: RenderNode,
+      header?: { rows: number; node: RenderNode },
+    ) => {
       drawnKey = `${key}:${columns}`
       const { offset, bodyRows } = e.props.scroll
       const contentRows = cached.key === drawnKey ? cached.contentRows : estimate
       const thumb = thumbOf({ offset, bodyRows, contentRows })
+      const pinnedRows = header ? header.rows + 1 : 0
+      const isPinned = header !== undefined && bodyRows > pinnedRows
       return (
         <Box flexDirection="column" position="relative" paddingRight={1}>
-          {content}
+          {isPinned && <Box key="header-room" height={pinnedRows} flexShrink={0} />}
+          {header && !isPinned ? (
+            <Box flexDirection="column" gap={1}>
+              {header.node}
+              {content}
+            </Box>
+          ) : (
+            content
+          )}
+          {isPinned && (
+            <Box key="header" position="absolute" left={0} right={1} top={offset} flexDirection="column">
+              <Box position="absolute" left={0} top={0} flexDirection="column">
+                {Array.from({ length: header.rows }, (_, row) => (
+                  <Text key={`header-blank-${row}`}>{' '.repeat(columns)}</Text>
+                ))}
+              </Box>
+              {header.node}
+              <Text key="header-rule" dimColor>
+                {'─'.repeat(columns)}
+              </Text>
+            </Box>
+          )}
           {thumb && (
             <Box key="scrollbar" position="absolute" right={0} top={offset} height={bodyRows} flexDirection="column">
               {Array.from({ length: bodyRows }, (_, row) =>
@@ -1416,15 +1466,16 @@ export const register: Register = (on, options) => {
         ))}
       </Box>
     )
-    const navRows = rowsOf(entries.map(entry => entry.text).join('  '), columns)
+    const navRows = navRowsOf(
+      entries.map(entry => entry.text),
+      columns,
+    )
     const page = (key: string, estimate: number, content: RenderNode) =>
       withScrollbar(
         `${key}:nav:${entries.map(entry => entry.text).join('|')}`,
         stackRows([navRows, estimate]),
-        <Box flexDirection="column" gap={1}>
-          {nav}
-          {content}
-        </Box>,
+        content,
+        { rows: navRows, node: nav },
       )
 
     if (section === 'tasks' && source.exists) {

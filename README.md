@@ -94,6 +94,8 @@ format. Two kinds of file are understood:
 - The pane always shows three tabs: Questions, Actions and Tasks, each with its count. An empty tab
   says so. A tab you open stays open even when empty; when the last item of the shown tab goes
   away on its own, the pane moves to the first tab that still has something.
+- The tabs stay at the top of the pane while you scroll its content, with a thin line under them.
+  In a pane too short for that, they scroll with the content.
 
 ## Notifications
 

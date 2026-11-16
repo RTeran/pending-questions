@@ -16,6 +16,7 @@ import {
   summarizeChange,
   taskCountsOf,
   listRows,
+  navRowsOf,
   rowsOf,
   spansDays,
   thumbOf,
@@ -511,6 +512,42 @@ const scrolled = (offset: number, bodyRows: number, contentRows: number) =>
 
 const thumbRows = async (ui: { find: (q: { type: string; key: string }) => Promise<{ children: unknown[] } | undefined> }) =>
   ((await ui.find({ type: 'Box', key: 'scrollbar' }))?.children ?? []).flatMap((row, i) => (JSON.stringify(row).includes('█') ? [i] : []))
+
+describe('pinned tabs', () => {
+  test('the tabs row is counted with wide emoji and wraps as whole tabs', () => {
+    expect(navRowsOf(['❓ Questions (1)', '📋 Tasks'], 80)).toBe(1)
+    expect(navRowsOf(['❓ Questions (1)', '📋 Tasks'], 20)).toBe(2)
+    expect(navRowsOf(['abcd', 'ef'], 8)).toBe(1)
+    expect(navRowsOf(['abcd', 'efg'], 8)).toBe(2)
+  })
+
+  test('the tabs stay at the top of the window while the body scrolls', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    expect((await ui.find({ type: 'Box', key: 'header' }))?.props).toMatchObject({ position: 'absolute', top: 0 })
+    expect(await ui.find({ type: 'Box', key: 'header-room' })).toBeDefined()
+
+    await ui.redraw(sized(5, 9).props)
+    expect((await ui.find({ type: 'Box', key: 'header' }))?.props).toMatchObject({ top: 9 })
+    const nav = (await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('nav-'))
+    expect(nav.map(b => b.key).sort()).toEqual(['nav-actions', 'nav-questions', 'nav-tasks'])
+    await ui.unmount()
+  })
+
+  test('a pane too short for the tabs keeps them in the flow', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+
+    const ui = await $.ui.mount(sized(2))
+    expect(await ui.find({ type: 'Box', key: 'header' })).toBeUndefined()
+    expect((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('nav-'))).toHaveLength(3)
+    await ui.unmount()
+  })
+})
 
 describe('scrollbar', () => {
   test('a list taller than the pane shows a scrollbar with the thumb at the top', async ($, on) => {
