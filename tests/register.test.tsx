@@ -316,7 +316,7 @@ test('a question is answered from the pane and leaves it', async ($, on) => {
   expect(submitted).toHaveLength(1)
   expect(submitted[0]).toMatch(/^\[Q1 · asked \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] B: No, use Intl$/)
   expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
-  expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
+  expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks 0/2' })
   await ui.unmount()
 })
 
@@ -572,13 +572,13 @@ describe('scrollbar', () => {
     await ui.unmount()
   })
 
-  test('the empty state has no scrollbar', async ($, on) => {
+  test('an empty tab that fits has no scrollbar', async ($, on) => {
     engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: false })
-    const ui = await $.ui.mount(sized(1))
+    const ui = await $.ui.mount(sized(8))
     await ui.press({ key: 'nav-tasks' })
     await ui.press({ key: 'tasks-dismiss' })
-    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^No tasks file in this session/ })).toBeDefined()
     expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
     await ui.unmount()
   })
@@ -980,7 +980,7 @@ describe('actions', () => {
     await ui.press({ key: 'action-done' })
     await clock.settle()
     expect(submitted).toEqual(['[A1 · done]'])
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks 0/2' })
     await ui.unmount()
   })
 
@@ -1107,7 +1107,7 @@ describe('actions', () => {
     await ui.press({ key: 'a-1' })
     await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
     expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeUndefined()
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks 0/2' })
     await ui.unmount()
   })
 })
@@ -1254,6 +1254,26 @@ describe('tasks setup', () => {
     expect(await taskSection($ as never)).toMatch(/in \/repo\/docs\/todo\.md,/)
   })
 
+  test('using the offered path for a missing file closes the setup and is not asked again', async ($, on) => {
+    const { store, toasts } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tasks-use' })
+    expect(store.get('tasksFile:/repo')).toBe('/repo/TASKS.md')
+    expect(toasts).toContain('Tasks file set to /repo/TASKS.md.')
+    expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /^No tasks yet\. The agent keeps its task list in \/repo\/TASKS\.md/ })).toBeDefined()
+    expect((await navTexts(ui))['nav-tasks']).toBe('▸ 📋 Tasks')
+    await ui.unmount()
+  })
+
+  test('a stored path whose file is missing does not ask again', async ($, on) => {
+    const { alerts, opened } = engine(on, { 'tasksFile:/repo': '/repo/TASKS.md' }, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+    expect(alerts).toEqual([])
+    expect(opened).toEqual([])
+  })
+
   test('dismissing hides the card and the file is shown once it appears', async ($, on) => {
     const { fs, clock, alerts } = engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start(START)
@@ -1261,7 +1281,7 @@ describe('tasks setup', () => {
     const ui = await $.ui.mount(PANE)
     await ui.press({ key: 'tasks-dismiss' })
     expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeUndefined()
-    expect(await ui.find({ type: 'Button', key: 'nav-tasks' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'tasks-change' })).toBeDefined()
 
     fs.write('/repo/TASKS.md', 'Plan notes\n')
     await clock.advance(5_000)
@@ -1730,7 +1750,7 @@ describe('menu', () => {
     await $.session.start(START)
     await $.tool.call({ tool: OPEN, question: 'one' })
     const ui = await $.ui.mount(PANE)
-    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-tasks': '📋 Tasks 0/2' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '📋 Tasks 0/2' })
 
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
     await ui.press({ key: 'nav-questions' })
@@ -1749,11 +1769,49 @@ describe('menu', () => {
     engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start({ ...START, isInteractive: false })
     const ui = await $.ui.mount(PANE)
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks (set up)' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks (set up)' })
     await ui.press({ key: 'nav-tasks' })
     await ui.press({ key: 'tasks-dismiss' })
-    expect(await navTexts(ui)).toEqual({})
-    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks' })
+    expect(await ui.find({ type: 'Text', text: /^No tasks file in this session/ })).toBeDefined()
+    await ui.press({ key: 'tasks-change' })
+    expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('an empty tab the human opened stays open when another tab loses an item', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'deploy it' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
+    await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect((await navTexts(ui))['nav-questions']).toBe('▸ ❓ Questions (0)')
+    await ui.unmount()
+  })
+
+  test('closing the last question from the list moves to a tab with something', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
+    await $.tool.call({ tool: CLOSE, n: 1 })
+    expect((await navTexts(ui))['nav-actions']).toBe('▸ 🛠 Actions (1)')
+    await ui.unmount()
+  })
+
+  test('the three tabs are always shown, each with its own empty state', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '📋 Tasks 0/2' })
+    expect(await ui.find({ type: 'Text', text: 'No questions pending.' })).toBeDefined()
+    await ui.press({ key: 'nav-actions' })
+    expect(await ui.find({ type: 'Text', text: 'No actions pending.' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -1886,7 +1944,7 @@ describe('menu review', () => {
     engine(on)
     await $.session.start(START)
     const ui = await $.ui.mount(PANE)
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '▸ 📋 Tasks 0/2' })
     expect(await ui.find({ type: 'Markdown' })).toBeDefined()
     await ui.unmount()
   })
@@ -1899,11 +1957,11 @@ describe('menu review', () => {
     const ui = await $.ui.mount(PANE)
     expect((await navTexts(ui))['nav-actions']).toBe('▸ 🛠 Actions (1)')
     await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
-    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-tasks': '📋 Tasks 0/2' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-actions': '🛠 Actions (0)', 'nav-tasks': '📋 Tasks 0/2' })
     await ui.unmount()
   })
 
-  test('nothing pending shows the empty state and no empty button', async ($, on) => {
+  test('nothing pending keeps the shown tab with its empty state', async ($, on) => {
     engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start({ ...START, isInteractive: false })
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
@@ -1911,9 +1969,8 @@ describe('menu review', () => {
     await ui.press({ key: 'nav-tasks' })
     await ui.press({ key: 'tasks-dismiss' })
     await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
-    expect(await navTexts(ui)).toEqual({})
-    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /\(0\)/ })).toBeUndefined()
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-actions': '▸ 🛠 Actions (0)', 'nav-tasks': '📋 Tasks' })
+    expect(await ui.find({ type: 'Text', text: 'No actions pending.' })).toBeDefined()
     await ui.unmount()
   })
 
@@ -1927,7 +1984,7 @@ describe('menu review', () => {
     expect((await navTexts(ui))['nav-actions']).toBe('🛠 Actions (1) (new)')
     await ui.input({ key: 'answer-1', text: 'yes', kind: 'submit' })
     await clock.settle()
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '📋 Tasks 0/2', 'nav-actions': '▸ 🛠 Actions (1)' })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '❓ Questions (0)', 'nav-tasks': '📋 Tasks 0/2', 'nav-actions': '▸ 🛠 Actions (1)' })
     await ui.unmount()
   })
 

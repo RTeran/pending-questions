@@ -64,9 +64,11 @@ format. Two kinds of file are understood:
   3. `TASKS.md` at the project root.
 
   A relative path is relative to the project root, and a leading `~` is your home directory.
-- If the file does not exist, the pane asks you once per session where it is. **Use this path**
-  saves your answer for the project. **Not this session** hides the question until the next
-  session. The pane keeps watching the path, so the section appears when the file is created.
+- If the file does not exist and you have not picked a path for the project, the pane asks you
+  once per session where it is. **Use this path** saves your answer for the project and closes the
+  question; later sessions do not ask again, and the Tasks tab shows the path until the file
+  exists. **Change path** asks again. **Not this session** hides the question until the next
+  session. The pane keeps watching the path, so the tasks appear when the file is created.
 - The pane checks the file every 5 seconds and right after the agent writes or edits it.
 - A change notifies you only when it is a checkbox that changed state, a new checkbox, a new
   heading or a `status:` line that changed (shown as `T-12 status: in_progress → done`, or as
@@ -84,6 +86,12 @@ format. Two kinds of file are understood:
   Where an organization's policy plugin skips the prompt events of the plugins you install, this
   line is not sent: `claude --debug` then logs `pending-questions: prompt.compose bypassed by …`.
   In that case the agent's own instructions must say which file to keep and in which format.
+
+## Tabs
+
+- The pane always shows three tabs: Questions, Actions and Tasks, each with its count. An empty tab
+  says so. A tab you open stays open even when empty; when the last item of the shown tab goes
+  away on its own, the pane moves to the first tab that still has something.
 
 ## Notifications
 
