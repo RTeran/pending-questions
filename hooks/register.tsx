@@ -398,35 +398,84 @@ async function save($: Engine) {
   $.ui.status(parts.length === 0 ? undefined : `${parts.join(' · ')} · /questions`)
 }
 
-async function resolveAction($: Engine, n: number) {
-  const list = await read($, actions)
-  if (!list.some(a => a.n === n)) return
-  await update($, actions, all => all.filter(a => a.n !== n))
+function openPane($: Engine) {
+  Promise.resolve()
+    .then(() => $.ui.open({ id: PANE, title: TITLE }))
+    .catch(error => logDebug($, `the pane did not open: ${String(error)}`))
+}
+
+async function announce($: Engine, sound: Sound) {
+  try {
+    await chime($, sound)
+  } catch (error) {
+    logSoundFailure($, error)
+  }
+  openPane($)
+}
+
+async function removeAction($: Engine, n: number) {
+  let isRemoved = false
+  await update($, actions, all => {
+    isRemoved = all.some(a => a.n === n)
+    return isRemoved ? all.filter(a => a.n !== n) : all
+  })
+  if (!isRemoved) return false
   await update($, view, current => (current.kind === 'action' && current.n === n ? ACTIONS : current))
   await save($)
-  $.ui.toast(`A${n} done.`)
+  return true
+}
+
+async function resolveAction($: Engine, n: number) {
+  if (await removeAction($, n)) $.ui.toast(`A${n} done.`)
 }
 
 async function markDone($: Engine, n: number) {
+  try {
+    await markDoneOrThrow($, n)
+  } catch (error) {
+    logDebug($, `A${n} could not be marked done: ${String(error)}`)
+    await unqueueAction($, n)
+    $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
+  }
+}
+
+async function unqueueAction($: Engine, n: number) {
+  try {
+    await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
+    await save($)
+  } catch (error) {
+    logDebug($, `A${n} could not be put back as pending: ${String(error)}`)
+  }
+}
+
+async function markDoneOrThrow($: Engine, n: number) {
   const a = (await read($, actions)).find(one => one.n === n)
   if (!a || a.queuedAt) return
   await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: new Date().toISOString() } : one)))
   await update($, view, () => ACTIONS)
   await save($)
-  void $.prompt
-    .submit({ text: doneTextOf(n), asUser: true })
-    .then(() => resolveAction($, n))
-    .catch(async () => {
-      await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
-      await save($)
-      $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
-    })
+  try {
+    await $.prompt.submit({ text: doneTextOf(n), asUser: true })
+  } catch (error) {
+    logDebug($, `A${n} could not be marked done: ${String(error)}`)
+    await unqueueAction($, n)
+    $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
+    return
+  }
+  try {
+    await resolveAction($, n)
+  } catch (error) {
+    logDebug($, `A${n} was marked done but the pane did not catch up: ${String(error)}`)
+  }
 }
 
 async function resolveQuestion($: Engine, n: number) {
-  const list = await read($, questions)
-  if (!list.some(q => q.n === n)) return
-  await update($, questions, all => all.filter(q => q.n !== n))
+  let isRemoved = false
+  await update($, questions, all => {
+    isRemoved = all.some(q => q.n === n)
+    return isRemoved ? all.filter(q => q.n !== n) : all
+  })
+  if (!isRemoved) return
   await update($, view, current => (current.kind === 'question' && current.n === n ? LIST : current))
   await save($)
   $.ui.toast(`Q${n} answered.`)
@@ -437,6 +486,25 @@ function setDraft($: Engine, n: number, draft: string) {
 }
 
 async function send($: Engine, n: number, raw: string) {
+  try {
+    await sendOrThrow($, n, raw)
+  } catch (error) {
+    logDebug($, `the answer to Q${n} could not be sent: ${String(error)}`)
+    await unqueueQuestion($, n)
+    $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
+  }
+}
+
+async function unqueueQuestion($: Engine, n: number) {
+  try {
+    await update($, questions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
+    await save($)
+  } catch (error) {
+    logDebug($, `Q${n} could not be put back as pending: ${String(error)}`)
+  }
+}
+
+async function sendOrThrow($: Engine, n: number, raw: string) {
   const answer = raw.trim()
   const q = (await read($, questions)).find(one => one.n === n)
   if (!q || q.queuedAt) return
@@ -449,14 +517,19 @@ async function send($: Engine, n: number, raw: string) {
   )
   await update($, view, () => LIST)
   await save($)
-  void $.prompt
-    .submit({ text: answerTextOf(q, answer), asUser: true })
-    .then(() => resolveQuestion($, n))
-    .catch(async () => {
-      await update($, questions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
-      await save($)
-      $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
-    })
+  try {
+    await $.prompt.submit({ text: answerTextOf(q, answer), asUser: true })
+  } catch (error) {
+    logDebug($, `the answer to Q${n} could not be sent: ${String(error)}`)
+    await unqueueQuestion($, n)
+    $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
+    return
+  }
+  try {
+    await resolveQuestion($, n)
+  } catch (error) {
+    logDebug($, `the answer to Q${n} was sent but the pane did not catch up: ${String(error)}`)
+  }
 }
 
 async function sendThroughChat($: Engine, n: number, raw: string) {
@@ -541,7 +614,7 @@ async function commit($: Engine, next: Snapshot) {
 async function notifyTasks($: Engine, sound: Sound, text: string) {
   await chime($, sound, 'tasks')
   await update($, view, () => TASKS_VIEW)
-  void $.ui.open({ id: PANE, title: TITLE })
+  openPane($)
   $.ui.toast(text)
 }
 
@@ -729,7 +802,7 @@ export const register: Register = (on, options) => {
       await update($, tasks, t => ({ ...t, isSetupAsked: true }))
       await update($, view, () => ({ kind: 'tasks-setup' }) as View)
       await chime($, sound, 'tasks')
-      void $.ui.open({ id: PANE, title: TITLE })
+      openPane($)
     }
     polling?.cancel()
     polling = $.clock.every(TASKS_POLL_MS, () => void observe($, sound, true))
@@ -738,12 +811,16 @@ export const register: Register = (on, options) => {
       const stored = await $.store.get(storeKey)
       if (isQuestionList(stored) && stored.length > 0) {
         await update($, questions, () => stored.map(({ queuedAt: _, ...q }) => q))
+      } else if (stored !== undefined && !isQuestionList(stored)) {
+        logDebug($, `the stored questions are in an unknown shape and were not restored`)
       }
     }
     if ((await read($, actions)).length === 0) {
       const stored = await $.store.get(actionsKey)
       if (isActionList(stored) && stored.length > 0) {
         await update($, actions, () => stored.map(({ queuedAt: _, ...a }) => a))
+      } else if (stored !== undefined && !isActionList(stored)) {
+        logDebug($, `the stored actions are in an unknown shape and were not restored`)
       }
     }
     await update($, now, () => new Date().toISOString())
@@ -757,7 +834,11 @@ export const register: Register = (on, options) => {
     await update($, view, () => LIST)
     await $.ui.open({ id: PANE, title: TITLE })
     const count = (await read($, questions)).length
-    return { text: count === 0 ? 'No pending questions.' : `Pane opened: ${count} pending.` }
+    const todo = (await read($, actions)).length
+    if (count === 0 && todo === 0) return { text: 'No pending questions or actions.' }
+    return {
+      text: `Pane opened: ${countOf(count, 'question', 'questions')} and ${countOf(todo, 'action', 'actions')} pending.`,
+    }
   })
 
   on('tool.call', { tool: OPEN_TOOL }, async ($, e) => {
@@ -786,8 +867,7 @@ export const register: Register = (on, options) => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
-    await chime($, sound)
-    void $.ui.open({ id: PANE, title: TITLE })
+    await announce($, sound)
 
     return {
       result: `Registered as Q${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until answered. Refer to it as Q${n}.`,
@@ -827,8 +907,7 @@ export const register: Register = (on, options) => {
     }
     await update($, actions, all => [...all, entry])
     await save($)
-    await chime($, sound)
-    void $.ui.open({ id: PANE, title: TITLE })
+    await announce($, sound)
 
     return {
       result: `Registered as A${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until marked done. Refer to it as A${n}.`,
@@ -837,11 +916,8 @@ export const register: Register = (on, options) => {
 
   on('tool.call', { tool: ACTION_CLOSE_TOOL }, async ($, e) => {
     const { n } = e as unknown as CloseInput
-    const list = await read($, actions)
-    if (typeof n !== 'number' || !list.some(a => a.n === n)) return { deny: `There is no pending A${String(n)}.` }
-    await update($, actions, all => all.filter(a => a.n !== n))
-    await update($, view, current => (current.kind === 'action' && current.n === n ? ACTIONS : current))
-    await save($)
+    if (typeof n !== 'number') return { deny: 'n must be the number of the action, the n of A<n>.' }
+    if (!(await removeAction($, n))) return { deny: `There is no pending A${n}.` }
     return { result: `A${n} removed from the pane.` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
 
@@ -866,10 +942,14 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
     if (e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
-    const n = answeredRef(e.text)
-    if (n !== undefined) await resolveQuestion($, n)
-    const done = doneRef(e.text)
-    if (done !== undefined) await resolveAction($, done)
+    try {
+      const n = answeredRef(e.text)
+      if (n !== undefined) await resolveQuestion($, n)
+      const done = doneRef(e.text)
+      if (done !== undefined) await resolveAction($, done)
+    } catch (error) {
+      logDebug($, `a reply could not close its item: ${String(error)}`)
+    }
     return result
   }).catch(($, e, next) => next(e))
 

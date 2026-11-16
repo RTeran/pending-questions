@@ -106,7 +106,20 @@ const engine = (
     const stderr = exitCode === 0 ? '' : 'execution error'
     return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  mock.store(on, stored)
+  const store = new Map(Object.entries(stored))
+  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  let isStoreFailing = false
+  let isStoreFailingAfterSubmit = false
+  on('store.set', (_, e) => {
+    if (isStoreFailing) throw new Error('disk full')
+    store.set(e.key, e.value)
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...store.keys()] }))
   on('session.id', () => ({ value: 'session-1' }))
   const clock = mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
@@ -131,11 +144,36 @@ const engine = (
   on('ui.scroll', () => ({}))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
-  on('prompt.submit', (_, e) => {
+  const pluginSubmits: string[] = []
+  let isSubmitFailing = false
+  let held: Promise<void> | undefined
+  on('prompt.submit', async (_, e) => {
     submitted.push(e.text)
+    if (e.origin.kind === 'plugin') pluginSubmits.push(e.text)
+    if (isStoreFailingAfterSubmit) isStoreFailing = true
+    if (held) await held
+    if (isSubmitFailing) throw new Error('the lead is gone')
     return { text: e.text }
   })
-  return { submitted, clock, tools, commands, plays, alerts, logs, opened, toasts, fs }
+  const control = {
+    failSubmits: () => {
+      isSubmitFailing = true
+    },
+    failStoreWritesAfterSubmit: () => {
+      isStoreFailingAfterSubmit = true
+    },
+    holdSubmits: () => {
+      let release = () => {}
+      held = new Promise(resolve => {
+        release = () => {
+          held = undefined
+          resolve()
+        }
+      })
+      return release
+    },
+  }
+  return { submitted, pluginSubmits, clock, tools, commands, plays, alerts, logs, opened, toasts, fs, store, control }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -178,7 +216,20 @@ test('/questions opens the pane', async ($, on) => {
     origin: { kind: 'composer' },
     presentation: { isFullscreen: false, columns: 120 },
   })
-  expect(ran.text).toBe('No pending questions.')
+  expect(ran.text).toBe('No pending questions or actions.')
+})
+
+test('/questions counts the pending actions too', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+  const ran = await $.command.run({
+    command: 'questions',
+    args: '',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 120 },
+  })
+  expect(ran.text).toBe('Pane opened: 0 questions and 1 action pending.')
 })
 
 test('a question is answered from the pane and leaves it', async ($, on) => {
@@ -715,6 +766,117 @@ describe('scrollbar cache', () => {
 })
 
 describe('actions', () => {
+  test('actions and their numbering are kept in the store for the session', async ($, on) => {
+    const { store } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'two', url: 'https://example.com' })
+    await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect(store.get('aseq:session-1')).toBe(2)
+    expect(store.get('actions:session-1')).toMatchObject([{ n: 2, action: 'two', url: 'https://example.com' }])
+  })
+
+  test('a Done that cannot be sent stays pending and can be pressed again', async ($, on) => {
+    const { control, toasts, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    control.failSubmits()
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'a-1' })
+    await ui.press({ key: 'action-done' })
+    await clock.settle()
+    expect(toasts).toContain('Could not mark A1 as done. It is still pending.')
+    await ui.press({ key: 'a-1' })
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a Done that was sent is never offered again, even if a later step fails', async ($, on) => {
+    const { control, toasts, logs, pluginSubmits, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'a-1' })
+    control.failStoreWritesAfterSubmit()
+    await ui.press({ key: 'action-done' })
+    await clock.settle()
+    expect(pluginSubmits).toEqual(['[A1 · done]'])
+    expect(toasts.filter(text => /Could not/.test(text))).toEqual([])
+    expect(logs.some(line => /A1/.test(line))).toBe(true)
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a done typed in the chat while Done is on its way closes the action once', async ($, on) => {
+    const { control, toasts, pluginSubmits, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const release = control.holdSubmits()
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'a-1' })
+    await ui.press({ key: 'action-done' })
+    await ui.press({ key: 'a-1' })
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Marked done at/ })).toBeDefined()
+
+    release()
+    await $.prompt.submit({ text: '[A1 · done] merged', wait: false, origin: { kind: 'composer' } })
+    await clock.settle()
+    expect(pluginSubmits).toEqual(['[A1 · done]'])
+    expect(toasts.filter(text => text === 'A1 done.')).toHaveLength(1)
+    await ui.unmount()
+  })
+
+  test('only a message that starts with the action reference closes it', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    await $.prompt.submit({ text: 'about [A1 · done]', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({ text: '[A12 · done]', wait: false, origin: { kind: 'composer' } })
+    await $.prompt.submit({
+      text: '/note [A1 · done]',
+      wait: false,
+      origin: { kind: 'composer' },
+      command: { name: 'note', args: '[A1 · done]' },
+    } as never)
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('closing an action needs its number', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const denied = await $.tool.call({ tool: ACTION_CLOSE, n: 'A1' })
+    expect(denied.deny).toBe('n must be the number of the action, the n of A<n>.')
+  })
+
+  test('a sound that fails does not fail the new action or question', async ($, on) => {
+    const { opened } = engine(on, {}, 'main\n', false, 'reject')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const action = await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(String(action.result)).toMatch(/^Registered as A1,/)
+    const question = await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(String(question.result)).toMatch(/^Registered as Q1,/)
+    expect(opened).toHaveLength(2)
+  })
+
+  test('a stored actions list in an unknown shape is logged and ignored', async ($, on) => {
+    const { logs } = engine(on, { 'actions:session-1': [{ title: 'old' }] })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    expect(logs.some(line => /stored actions/.test(line))).toBe(true)
+  })
+
   test('an action is registered with its own numbering', async ($, on) => {
     engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
