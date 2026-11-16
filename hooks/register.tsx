@@ -1103,7 +1103,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'action_close',
       description:
-        'Remove a pending action from the side pane without it being done, because it no longer matters. Actions the human marks done leave the pane by themselves.',
+        'Remove a pending action from the side pane because it was done elsewhere or no longer matters. Actions the human marks done in the pane leave it by themselves.',
       inputSchema: {
         type: 'object',
         properties: {

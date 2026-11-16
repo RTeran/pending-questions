@@ -40,7 +40,7 @@ something by hand, provide a credential.
 - Open an action to see its details and press **Done** when you have done it. The agent receives
   `[A2 · done]`.
 - A message typed in the chat that starts with `[A2` marks the action done too.
-- `action_close` removes an action that no longer matters.
+- `action_close` removes an action that was done elsewhere or no longer matters.
 
 ## Tasks
 
