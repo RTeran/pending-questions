@@ -336,7 +336,8 @@ const logDebug = ($: Engine, text: string) => {
   }
 }
 
-const logSoundFailure = ($: Engine, error: unknown) => logDebug($, `the new-question sound did not play: ${String(error)}`)
+const logSoundFailure = ($: Engine, error: unknown, section = 'new-item') =>
+  logDebug($, `the ${section} sound did not play: ${String(error)}`)
 
 export type Sound = 'alert' | 'ding' | 'off'
 
@@ -365,15 +366,19 @@ export async function chime(
   try {
     const at = await $.clock.now()
     if (at - lastSoundAt[gate] < SOUND_GAP_MS[gate]) return { played: undefined }
+    const previous = lastSoundAt[gate]
     lastSoundAt[gate] = at
+    const played = Promise.resolve()
+      .then(() => (sound === 'alert' ? playAlert($) : $.audio.play(ACK_SOUND)))
+      .catch(error => {
+        if (lastSoundAt[gate] === at) lastSoundAt[gate] = previous
+        logSoundFailure($, error, gate)
+      })
+    return { played }
   } catch (error) {
-    logSoundFailure($, error)
+    logSoundFailure($, error, gate)
     return { played: undefined }
   }
-  const played = Promise.resolve()
-    .then(() => (sound === 'alert' ? playAlert($) : $.audio.play(ACK_SOUND)))
-    .catch(error => logSoundFailure($, error))
-  return { played }
 }
 
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
@@ -432,9 +437,9 @@ async function keysOf($: Engine) {
   return keys
 }
 
-async function noteSessionEnd($: Engine, reason: string) {
-  endReason = reason
-  await update($, chain, c => ({ ...c, endReason: reason }))
+async function noteSessionEnd($: Engine, reason: unknown) {
+  endReason = reason === 'clear' ? 'clear' : 'other'
+  await update($, chain, c => ({ ...c, endReason }))
 }
 
 async function replaceLists($: Engine, keys: { open: string; actions: string }) {
@@ -511,9 +516,33 @@ export const sectionOf = (shown: View): Section =>
       ? 'tasks'
       : 'questions'
 
+const SECTION_ORDER: readonly Section[] = ['questions', 'actions', 'tasks']
+
+const isTasksReachable = (source: TasksSource) => source.exists || (source.path !== '' && !source.isDismissed)
+
+export const effectiveSectionOf = (preferred: Section, questionCount: number, actionCount: number, hasTasks: boolean) => {
+  const hasContent: Record<Section, boolean> = { questions: questionCount > 0, actions: actionCount > 0, tasks: hasTasks }
+  return hasContent[preferred] ? preferred : SECTION_ORDER.find(section => hasContent[section])
+}
+
+// An empty section is never drawn: the pane shows the first one with something instead, so
+// opening a section clears the mark of the one the human will actually see.
 async function openSection($: Engine, section: Section) {
   await update($, unseen, marks => ({ ...marks, [section]: false }))
   await update($, view, () => VIEW_OF[section])
+  await settleMarks($)
+}
+
+async function settleMarks($: Engine) {
+  const shownView = await read($, view)
+  if (shownView.kind === 'question' || shownView.kind === 'action') return
+  const shown = effectiveSectionOf(
+    sectionOf(shownView),
+    (await read($, questions)).length,
+    (await read($, actions)).length,
+    isTasksReachable(await read($, tasks)),
+  )
+  if (shown) await update($, unseen, marks => (marks[shown] ? { ...marks, [shown]: false } : marks))
 }
 
 async function leaveDetail($: Engine, kind: 'question' | 'action', n: number) {
@@ -529,37 +558,38 @@ async function isPaneShown($: Engine) {
   try {
     return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
   } catch (error) {
-    logDebug($, `the pane state could not be read: ${String(error)}`)
-    return false
+    logDebug($, `the pane state could not be read; the view stays where it is: ${String(error)}`)
+    return true
   }
 }
 
 // While the human is in a question or an action on a shown pane, the pane stays put: the change is marked on
 // its menu button instead. Tasks then make no sound either, as they are never urgent.
 async function notifyChange($: Engine, sound: Sound, section: Section, text?: string) {
+  let isInDetail = false
   try {
-    await showChange($, sound, section, text)
+    const shown = await read($, view)
+    isInDetail = (shown.kind === 'question' || shown.kind === 'action') && (await isPaneShown($))
+    if (isInDetail) await update($, unseen, marks => ({ ...marks, [section]: true }))
+    else await openSection($, section)
   } catch (error) {
-    logDebug($, `the ${section} change could not be shown: ${String(error)}`)
+    logDebug($, `the pane state for the ${section} change could not be written: ${String(error)}`)
   }
-}
-
-async function showChange($: Engine, sound: Sound, section: Section, text?: string) {
-  const shown = await read($, view)
-  const isInDetail = (shown.kind === 'question' || shown.kind === 'action') && (await isPaneShown($))
-  if (isInDetail) await update($, unseen, marks => ({ ...marks, [section]: true }))
   if (!isInDetail || section !== 'tasks') {
     try {
       await chime($, sound, section)
     } catch (error) {
-      logSoundFailure($, error)
+      logSoundFailure($, error, section)
     }
   }
-  if (!isInDetail) {
-    await openSection($, section)
-    openPane($)
+  if (!isInDetail) openPane($)
+  if (text) {
+    try {
+      $.ui.toast(text)
+    } catch (error) {
+      logDebug($, `the ${section} toast could not be shown: ${String(error)}`)
+    }
   }
-  if (text) $.ui.toast(text)
 }
 
 function openPane($: Engine) {
@@ -576,6 +606,7 @@ async function removeAction($: Engine, n: number) {
   })
   if (!isRemoved) return false
   await leaveDetail($, 'action', n)
+  await settleMarks($)
   await save($)
   return true
 }
@@ -598,21 +629,47 @@ async function markDone($: Engine, n: number) {
   } catch (error) {
     if (isSent) {
       logDebug($, `A${n} was marked done but the pane did not catch up: ${String(error)}`)
+      if (!(await dropAction($, n))) await unqueueAction($, n)
       return
     }
     logDebug($, `A${n} could not be marked done: ${String(error)}`)
-    await unqueueAction($, n)
-    $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
+    $.ui.toast(
+      (await unqueueAction($, n))
+        ? `Could not mark A${n} as done. It is still pending.`
+        : `Could not mark A${n} as done, and its Done button could not be reset. Restart the session to try again.`,
+    )
   }
+}
+
+async function dropAction($: Engine, n: number) {
+  try {
+    await update($, actions, all => all.filter(one => one.n !== n))
+    await leaveDetail($, 'action', n)
+  } catch (error) {
+    logDebug($, `A${n} could not be taken out of the pane: ${String(error)}`)
+    return false
+  }
+  try {
+    await save($)
+  } catch (error) {
+    logDebug($, `the pane without A${n} could not be saved: ${String(error)}`)
+  }
+  return true
 }
 
 async function unqueueAction($: Engine, n: number) {
   try {
     await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
-    await save($)
   } catch (error) {
     logDebug($, `A${n} could not be put back as pending: ${String(error)}`)
+    return false
   }
+  try {
+    await save($)
+  } catch (error) {
+    logDebug($, `A${n} is pending again but could not be saved: ${String(error)}`)
+  }
+  return true
 }
 
 async function resolveQuestion($: Engine, n: number) {
@@ -623,6 +680,7 @@ async function resolveQuestion($: Engine, n: number) {
   })
   if (!isRemoved) return
   await leaveDetail($, 'question', n)
+  await settleMarks($)
   await save($)
   $.ui.toast(`Q${n} answered.`)
 }
@@ -652,21 +710,47 @@ async function send($: Engine, n: number, raw: string) {
   } catch (error) {
     if (isSent) {
       logDebug($, `the answer to Q${n} was sent but the pane did not catch up: ${String(error)}`)
+      if (!(await dropQuestion($, n))) await unqueueQuestion($, n)
       return
     }
     logDebug($, `the answer to Q${n} could not be sent: ${String(error)}`)
-    await unqueueQuestion($, n)
-    $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
+    $.ui.toast(
+      (await unqueueQuestion($, n))
+        ? `Could not send the answer to Q${n}. It is still pending.`
+        : `Could not send the answer to Q${n}, and its answer field could not be reset. Restart the session to try again.`,
+    )
   }
+}
+
+async function dropQuestion($: Engine, n: number) {
+  try {
+    await update($, questions, all => all.filter(one => one.n !== n))
+    await leaveDetail($, 'question', n)
+  } catch (error) {
+    logDebug($, `Q${n} could not be taken out of the pane: ${String(error)}`)
+    return false
+  }
+  try {
+    await save($)
+  } catch (error) {
+    logDebug($, `the pane without Q${n} could not be saved: ${String(error)}`)
+  }
+  return true
 }
 
 async function unqueueQuestion($: Engine, n: number) {
   try {
     await update($, questions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
-    await save($)
   } catch (error) {
     logDebug($, `Q${n} could not be put back as pending: ${String(error)}`)
+    return false
   }
+  try {
+    await save($)
+  } catch (error) {
+    logDebug($, `Q${n} is pending again but could not be saved: ${String(error)}`)
+  }
+  return true
 }
 
 async function sendThroughChat($: Engine, n: number, raw: string) {
@@ -1218,24 +1302,24 @@ export const register: Register = (on, options) => {
     }
 
     const marks = await read($, unseen)
-    const section = sectionOf(current)
     const tasksLabel = tasksLabelOf(source)
-    const hasTasks = source.exists || (source.path !== '' && !source.isDismissed)
+    const hasTasks = isTasksReachable(source)
+    const openAction = current.kind === 'action' ? todo.find(a => a.n === current.n) : undefined
+    const section = open || openAction ? sectionOf(current) : effectiveSectionOf(sectionOf(current), list.length, todo.length, hasTasks)
+    if (!section) {
+      drawnKey = ''
+      return <Text dimColor>Nothing pending: no questions, actions or tasks.</Text>
+    }
     const entries = [
       { section: 'questions' as const, label: `❓ Questions (${list.length})`, isShown: list.length > 0 },
       { section: 'tasks' as const, label: `📋 Tasks${tasksLabel === '' ? '' : tasksLabel === 'set up' ? ' (set up)' : ` ${tasksLabel}`}`, isShown: hasTasks },
       { section: 'actions' as const, label: `🛠 Actions (${todo.length})`, isShown: todo.length > 0 },
     ]
-      .filter(entry => entry.isShown || entry.section === section)
+      .filter(entry => entry.isShown)
       .map(entry => ({
         ...entry,
         text: `${entry.section === section ? '▸ ' : ''}${entry.label}${marks[entry.section] ? ' (new)' : ''}`,
       }))
-
-    if (list.length === 0 && todo.length === 0 && !hasTasks && current.kind !== 'question' && current.kind !== 'action') {
-      drawnKey = ''
-      return <Text dimColor>Nothing pending: no questions, actions or tasks.</Text>
-    }
 
     const nav = (
       <Box key="nav" flexDirection="row" flexWrap="wrap" columnGap={2}>
@@ -1311,7 +1395,6 @@ export const register: Register = (on, options) => {
     }
 
     if (section === 'actions') {
-      const openAction = current.kind === 'action' ? todo.find(a => a.n === current.n) : undefined
       if (openAction) {
         const n = openAction.n
         return page(
@@ -1342,10 +1425,7 @@ export const register: Register = (on, options) => {
       return page(
         `actions:${todo.map(a => `${a.n}${a.queuedAt ? 's' : ''}`).join(',')}`,
         actionListRows(todo, at, columns),
-        todo.length === 0 ? (
-          <Text dimColor>No pending actions.</Text>
-        ) : (
-          <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column" gap={1}>
             {[...todo]
               .sort((a, b) => a.askedAt.localeCompare(b.askedAt))
               .map(a => (
@@ -1362,8 +1442,7 @@ export const register: Register = (on, options) => {
                   </Button>
                 </Box>
               ))}
-          </Box>
-        ),
+        </Box>,
       )
     }
 
@@ -1440,8 +1519,6 @@ export const register: Register = (on, options) => {
         </Box>,
       )
     }
-
-    if (list.length === 0) return page('questions:none', 1, <Text dimColor>No pending questions.</Text>)
 
     const showDays = spansDays(list, at)
     return page(

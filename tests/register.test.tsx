@@ -171,15 +171,21 @@ const engine = (
   })
   const opened: string[] = []
   const titles: string[] = []
+  let isOpenFailing = false
   on('ui.open', (_, e) => {
+    if (isOpenFailing) throw new Error('no room for the pane')
     opened.push(e.id)
     titles.push(e.title ?? '')
     return { value: { isPlaced: true } }
   })
   let isPaneShown = true
-  on('ui.panes', () => ({
-    value: isPaneShown ? [{ id: 'pending-questions', title: 'Agent inbox', isShown: true, isFocused: false, isPlaced: true }] : [],
-  }))
+  let isPanesFailing = false
+  on('ui.panes', () => {
+    if (isPanesFailing) throw new Error('no panes')
+    return {
+      value: isPaneShown ? [{ id: 'pending-questions', title: 'Agent inbox', isShown: true, isFocused: false, isPlaced: true }] : [],
+    }
+  })
   on('ui.scroll', () => ({}))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
@@ -200,6 +206,12 @@ const engine = (
     },
     failStoreWritesAfterSubmit: () => {
       isStoreFailingAfterSubmit = true
+    },
+    failPanes: () => {
+      isPanesFailing = true
+    },
+    failOpen: () => {
+      isOpenFailing = true
     },
     hidePane: () => {
       isPaneShown = false
@@ -302,7 +314,8 @@ test('a question is answered from the pane and leaves it', async ($, on) => {
 
   expect(submitted).toHaveLength(1)
   expect(submitted[0]).toMatch(/^\[Q1 · asked \d{4}-\d{2}-\d{2} \d{2}:\d{2}\] B: No, use Intl$/)
-  expect((await ui.find({ type: 'Text', text: /No pending questions/ }))?.text).toBe('No pending questions.')
+  expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
+  expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
   await ui.unmount()
 })
 
@@ -863,6 +876,8 @@ describe('actions', () => {
     expect(toasts.filter(text => /Could not/.test(text))).toEqual([])
     expect(logs.some(line => /A1/.test(line))).toBe(true)
     expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /queued|Marked done/ })).toBeUndefined()
     await ui.unmount()
   })
 
@@ -964,7 +979,7 @@ describe('actions', () => {
     await ui.press({ key: 'action-done' })
     await clock.settle()
     expect(submitted).toEqual(['[A1 · done]'])
-    expect((await ui.find({ type: 'Text', text: /No pending actions/ }))?.text).toBe('No pending actions.')
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
     await ui.unmount()
   })
 
@@ -1081,7 +1096,7 @@ describe('actions', () => {
     expect(String(next.result)).toMatch(/^Registered as A4,/)
   })
 
-  test('closing an open action returns the pane to the actions list', async ($, on) => {
+  test('closing the open last action moves the pane to the next section', async ($, on) => {
     engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
@@ -1090,8 +1105,8 @@ describe('actions', () => {
     await ui.press({ key: 'nav-actions' })
     await ui.press({ key: 'a-1' })
     await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
-    expect((await ui.find({ type: 'Text', text: /No pending actions/ }))?.text).toBe('No pending actions.')
-    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '📋 Tasks 0/2', 'nav-actions': '▸ 🛠 Actions (0)' })
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeUndefined()
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
     await ui.unmount()
   })
 })
@@ -1733,7 +1748,7 @@ describe('menu', () => {
     engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start({ ...START, isInteractive: false })
     const ui = await $.ui.mount(PANE)
-    expect((await navTexts(ui))['nav-tasks']).toBe('📋 Tasks (set up)')
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks (set up)' })
     await ui.press({ key: 'nav-tasks' })
     await ui.press({ key: 'tasks-dismiss' })
     expect(await navTexts(ui)).toEqual({})
@@ -1862,5 +1877,137 @@ describe('notifications', () => {
     const { statuses } = engine(on, {}, 'main\n', false, 'ok', {})
     await $.session.start(START)
     expect(statuses.at(-1)).toBeUndefined()
+  })
+})
+
+describe('menu review', () => {
+  test('a start with no questions opens on the tasks', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '▸ 📋 Tasks 0/2' })
+    expect(await ui.find({ type: 'Markdown' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('closing the last action moves to the next section with something', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const ui = await $.ui.mount(PANE)
+    expect((await navTexts(ui))['nav-actions']).toBe('▸ 🛠 Actions (1)')
+    await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-tasks': '📋 Tasks 0/2' })
+    await ui.unmount()
+  })
+
+  test('nothing pending shows the empty state and no empty button', async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ ...START, isInteractive: false })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-tasks' })
+    await ui.press({ key: 'tasks-dismiss' })
+    await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect(await navTexts(ui)).toEqual({})
+    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\(0\)/ })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('answering the last question shows the next section without a stale new mark', async ($, on) => {
+    const { clock } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect((await navTexts(ui))['nav-actions']).toBe('🛠 Actions (1) (new)')
+    await ui.input({ key: 'answer-1', text: 'yes', kind: 'submit' })
+    await clock.settle()
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '📋 Tasks 0/2', 'nav-actions': '▸ 🛠 Actions (1)' })
+    await ui.unmount()
+  })
+
+  test('a new item while an action is shown keeps the view', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'a-1' })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeDefined()
+    expect((await navTexts(ui))['nav-questions']).toBe('❓ Questions (1) (new)')
+    await ui.press({ key: 'back-actions' })
+    await ui.press({ key: 'nav-questions' })
+    expect((await navTexts(ui))['nav-questions']).toBe('▸ ❓ Questions (1)')
+    await ui.unmount()
+  })
+
+  test('a /resume clears the new marks', async ($, on) => {
+    const { control } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'a-1' })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.session.end({ reason: 'resume', sessionId: 'session-1' } as never)
+    control.clear('session-5')
+    await $.tool.call({ tool: OPEN, question: 'other' })
+    expect(Object.values(await navTexts(ui)).some(text => /new/.test(String(text)))).toBe(false)
+    await ui.unmount()
+  })
+
+  test('an end that is not a /clear carries nothing over', async ($, on) => {
+    const { control, store } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.session.end({ reason: 'logout', sessionId: 'session-1' } as never)
+    control.clear('session-4')
+    expect(String((await $.tool.call({ tool: OPEN, question: 'two' })).result)).toMatch(/^Registered as Q1,/)
+    expect(store.has('alias:session-4')).toBe(false)
+  })
+
+  test('a /clear in a teammate process writes no alias', async ($, on) => {
+    const { control, store } = engine(on, {}, 'teammate\n')
+    await $.session.start(START)
+    await $.session.end({ reason: 'clear', sessionId: 'session-1' } as never)
+    control.clear('session-2')
+    await $.prompt.submit({ text: '[Q1 · asked 2026-11-11 10:42] ok', wait: false, origin: { kind: 'composer' } })
+    expect([...store.keys()].filter(key => key.startsWith('alias:'))).toEqual([])
+  })
+
+  test('a pane that cannot open is logged and the question is still registered', async ($, on) => {
+    const { control, logs, clock } = engine(on)
+    await $.session.start(START)
+    control.failOpen()
+    const opened = await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(String(opened.result)).toMatch(/^Registered as Q1,/)
+    await clock.settle()
+    expect(logs.some(line => /pane did not open/.test(line))).toBe(true)
+  })
+
+  test('a pane whose state cannot be read keeps the human on the question', async ($, on) => {
+    const { control } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    control.failPanes()
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a tasks sound that fails does not use up the tasks gap', async ($, on) => {
+    const { fs, clock, alerts } = engine(on, {}, 'main\n', false, 'reject')
+    await $.session.start(START)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(10_000)
+    expect(alerts).toHaveLength(1)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [x] two\n')
+    await clock.advance(10_000)
+    expect(alerts).toHaveLength(2)
   })
 })
