@@ -510,7 +510,7 @@ export const register: Register = on => {
 
     const showDays = spansDays(list, at)
     return withScrollbar(
-      `list:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      `list:${showDays ? 'days' : 'today'}:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
       listRows(list, at, columns),
       <Box flexDirection="column" gap={1}>
         {groupByDay(list, at).map(group => (
