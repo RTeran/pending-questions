@@ -379,18 +379,40 @@ type OpenInput = { question?: unknown; context?: unknown; options?: unknown; rec
 type CloseInput = { n?: unknown; reason?: unknown }
 type ActionOpenInput = { action?: unknown; context?: unknown; url?: unknown }
 
-let storeKey = 'open'
-let seqKey = 'seq'
-let actionsKey = 'actions'
-let actionSeqKey = 'aseq'
+// A /clear gives the process a new session id without a session.start. The store keys stay
+// on the id the chain started with, so open items and their numbering outlive the /clear;
+// the alias lets a reload whose $.state was lost find that id again.
+const chain = atom({ plugin: 'pending-questions', key: 'chain' } as const, '')
+let chainId = ''
+let seenId = ''
+
+async function keysOf($: Engine) {
+  const id = await $.session.id()
+  if (chainId === '') {
+    const alias = await $.store.get(`alias:${id}`)
+    chainId = (await read($, chain)) || (typeof alias === 'string' && alias !== '' ? alias : id)
+    await update($, chain, () => chainId)
+  }
+  if (id !== seenId) {
+    seenId = id
+    if (id !== chainId) await $.store.set(`alias:${id}`, chainId)
+  }
+  return {
+    open: `open:${chainId}`,
+    seq: `seq:${chainId}`,
+    actions: `actions:${chainId}`,
+    actionSeq: `aseq:${chainId}`,
+  }
+}
 
 const countOf = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
 
 async function save($: Engine) {
   const list = await read($, questions)
   const todo = await read($, actions)
-  await $.store.set(storeKey, list)
-  await $.store.set(actionsKey, todo)
+  const keys = await keysOf($)
+  await $.store.set(keys.open, list)
+  await $.store.set(keys.actions, todo)
   const parts = [
     ...(list.length > 0 ? [`❓ ${countOf(list.length, 'pending question', 'pending questions')}`] : []),
     ...(todo.length > 0 ? [`🛠 ${countOf(todo.length, 'pending action', 'pending actions')}`] : []),
@@ -697,11 +719,9 @@ export const register: Register = (on, options) => {
       logDebug($, `unknown sound option ${JSON.stringify(options.sound)}; playing the alert`)
     }
 
-    const sessionId = await $.session.id()
-    storeKey = `open:${sessionId}`
-    seqKey = `seq:${sessionId}`
-    actionsKey = `actions:${sessionId}`
-    actionSeqKey = `aseq:${sessionId}`
+    chainId = ''
+    seenId = ''
+    const keys = await keysOf($)
 
     await $.tool.register({
       name: 'question_open',
@@ -808,7 +828,7 @@ export const register: Register = (on, options) => {
     polling = $.clock.every(TASKS_POLL_MS, () => void observe($, sound, true))
 
     if ((await read($, questions)).length === 0) {
-      const stored = await $.store.get(storeKey)
+      const stored = await $.store.get(keys.open)
       if (isQuestionList(stored) && stored.length > 0) {
         await update($, questions, () => stored.map(({ queuedAt: _, ...q }) => q))
       } else if (stored !== undefined && !isQuestionList(stored)) {
@@ -816,7 +836,7 @@ export const register: Register = (on, options) => {
       }
     }
     if ((await read($, actions)).length === 0) {
-      const stored = await $.store.get(actionsKey)
+      const stored = await $.store.get(keys.actions)
       if (isActionList(stored) && stored.length > 0) {
         await update($, actions, () => stored.map(({ queuedAt: _, ...a }) => a))
       } else if (stored !== undefined && !isActionList(stored)) {
@@ -828,6 +848,18 @@ export const register: Register = (on, options) => {
     await save($)
 
     return next(e)
+  })
+
+  on('session.end', async ($, e, next) => {
+    const result = await next(e)
+    if (e.reason === 'clear' && isLead) {
+      try {
+        await keysOf($)
+      } catch (error) {
+        logDebug($, `the store keys could not follow the /clear: ${String(error)}`)
+      }
+    }
+    return result
   })
 
   on('command.run', { command: 'questions' }, async $ => {
@@ -851,8 +883,9 @@ export const register: Register = (on, options) => {
     const question = typeof input.question === 'string' ? input.question.trim() : ''
     if (question === '') return { deny: 'question is required.' }
 
-    const n = Number((await $.store.get(seqKey)) ?? 0) + 1
-    await $.store.set(seqKey, n)
+    const { seq } = await keysOf($)
+    const n = Number((await $.store.get(seq)) ?? 0) + 1
+    await $.store.set(seq, n)
     const options = optionsOf(input.options)
     const recommended =
       typeof input.recommended === 'string' && options.some(o => o.key === input.recommended) ? input.recommended : undefined
@@ -894,8 +927,9 @@ export const register: Register = (on, options) => {
     const action = typeof input.action === 'string' ? input.action.trim() : ''
     if (action === '') return { deny: 'action is required.' }
 
-    const n = Number((await $.store.get(actionSeqKey)) ?? 0) + 1
-    await $.store.set(actionSeqKey, n)
+    const { actionSeq } = await keysOf($)
+    const n = Number((await $.store.get(actionSeq)) ?? 0) + 1
+    await $.store.set(actionSeq, n)
     const url = typeof input.url === 'string' ? input.url.trim() : ''
     const askedAt = new Date().toISOString()
     const entry: Action = {

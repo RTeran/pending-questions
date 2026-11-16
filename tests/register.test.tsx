@@ -120,7 +120,9 @@ const engine = (
     return { value: undefined }
   })
   on('store.keys', () => ({ value: [...store.keys()] }))
-  on('session.id', () => ({ value: 'session-1' }))
+  let sessionId = 'session-1'
+  on('session.id', () => ({ value: sessionId }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   const clock = mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
   const toasts: string[] = []
@@ -161,6 +163,9 @@ const engine = (
     },
     failStoreWritesAfterSubmit: () => {
       isStoreFailingAfterSubmit = true
+    },
+    clear: (nextId: string) => {
+      sessionId = nextId
     },
     holdSubmits: () => {
       let release = () => {}
@@ -1326,5 +1331,62 @@ describe('tasks notifications', () => {
     const result = await $.tool.call({ tool: 'Edit', file_path: '/repo/TASKS.md', old_string: 'a', new_string: 'b' } as never)
     expect(result.result).toBe('written')
     expect(result.deny).toBeUndefined()
+  })
+})
+
+describe('a /clear', () => {
+  const answer = (text: string) => ({ text, wait: false, origin: { kind: 'composer' } }) as const
+
+  test('keeps the open items and goes on with the numbering', async ($, on) => {
+    const { control, store } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    control.clear('session-2')
+    expect(String((await $.tool.call({ tool: OPEN, question: 'three' })).result)).toMatch(/^Registered as Q3,/)
+    expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })).result)).toMatch(/^Registered as A2,/)
+    expect(store.get('alias:session-2')).toBe('session-1')
+
+    await $.prompt.submit(answer('[Q1 · asked 2026-11-11 10:42] ok'))
+    await $.prompt.submit(answer('[A1 · done]'))
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'q-2' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-3' })).toBeDefined()
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'a-2' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('and a reload right after it keep both', async ($, on) => {
+    const { control, store } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    control.clear('session-2')
+    await $.session.end({ reason: 'clear', sessionId: 'session-1' } as never)
+    expect(store.get('alias:session-2')).toBe('session-1')
+    await $.session.start(START)
+    expect(String((await $.tool.call({ tool: OPEN, question: 'two' })).result)).toMatch(/^Registered as Q2,/)
+    expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })).result)).toMatch(/^Registered as A2,/)
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a reload whose state was lost finds the numbering through the alias', async ($, on) => {
+    const { store } = engine(on, { 'alias:session-1': 'session-0', 'seq:session-0': 13, 'aseq:session-0': 2, 'open:session-0': [question(13, new Date().toISOString())] })
+    await $.session.start(START)
+    expect(String((await $.tool.call({ tool: OPEN, question: 'next' })).result)).toMatch(/^Registered as Q14,/)
+    expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'next' })).result)).toMatch(/^Registered as A3,/)
+    expect(store.get('seq:session-1')).toBeUndefined()
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-13' })).toBeDefined()
+    await ui.unmount()
   })
 })

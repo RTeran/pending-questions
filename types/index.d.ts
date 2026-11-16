@@ -47,6 +47,7 @@ declare module 'claude-code' {
       questions: Shaped<Question[]>
       actions: Shaped<Action[]>
       tasks: Shaped<TasksSource>
+      chain: string
       view: Shaped<View>
       now: string
       scroll: Shaped<ScrollCache>
