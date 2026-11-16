@@ -213,9 +213,15 @@ export const hashOf = (text: string) => {
 const CHECKBOX = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/
 const HEADING = /^#{1,6}\s+(.*)$/
 
+const STATUS = /^\s*(?:[-*+]\s+)?status\s*:\s*(.*?)\s*$/i
+
+// A file like the ClickUp sync's TASKS.md has no checkboxes: each task is a heading with a
+// `status:` line under it, so a status is matched to the nearest heading above it.
 const outlineOf = (text: string) => {
   const items = new Map<string, boolean>()
   const headings = new Set<string>()
+  const statuses = new Map<string, string>()
+  let heading: string | undefined
   for (const line of normalize(text).split('\n')) {
     const item = CHECKBOX.exec(line)
     if (item) {
@@ -223,13 +229,32 @@ const outlineOf = (text: string) => {
       if (!items.has(label)) items.set(label, item[1] !== ' ')
       continue
     }
-    const heading = HEADING.exec(line)
-    if (heading) headings.add(heading[1]?.trim() ?? '')
+    const title = HEADING.exec(line)
+    if (title) {
+      heading = title[1]?.trim() ?? ''
+      headings.add(heading)
+      continue
+    }
+    const status = STATUS.exec(line)
+    if (status && heading !== undefined && !statuses.has(heading)) statuses.set(heading, (status[1] ?? '').toLowerCase())
   }
-  return { items, headings }
+  return { items, headings, statuses }
 }
 
-export type TasksChange = { done: number; reopened: number; added: number; sections: number; isNotable: boolean; text: string }
+const taskNameOf = (heading: string) => {
+  const [first, ...rest] = heading.split(/\s+/)
+  return rest.length > 0 && first && /^[a-z]+-\S+$/i.test(first) ? first : heading
+}
+
+export type TasksChange = {
+  done: number
+  reopened: number
+  added: number
+  sections: number
+  statuses: number
+  isNotable: boolean
+  text: string
+}
 
 export const summarizeChange = (prev: string, next: string): TasksChange => {
   const before = outlineOf(prev)
@@ -244,6 +269,10 @@ export const summarizeChange = (prev: string, next: string): TasksChange => {
     else if (was && !isChecked) reopened++
   }
   const sections = [...after.headings].filter(heading => !before.headings.has(heading)).length
+  const statusChanges = [...after.statuses].flatMap(([heading, status]) => {
+    const was = before.statuses.get(heading)
+    return was === undefined || was === status ? [] : [`${taskNameOf(heading)} status: ${was} → ${status}`]
+  })
   const counts = ([
     [done, 'done'],
     [reopened, 'reopened'],
@@ -252,8 +281,17 @@ export const summarizeChange = (prev: string, next: string): TasksChange => {
   const all = [
     ...counts.map(([count, word], i) => (i === 0 ? `${countOf(count, 'task', 'tasks')} ${word}` : `${count} ${word}`)),
     ...(sections > 0 ? [countOf(sections, 'new section', 'new sections')] : []),
+    ...(statusChanges.length > 2 ? [countOf(statusChanges.length, 'status change', 'status changes')] : statusChanges),
   ]
-  return { done, reopened, added, sections, isNotable: all.length > 0, text: all.join(', ') }
+  return {
+    done,
+    reopened,
+    added,
+    sections,
+    statuses: statusChanges.length,
+    isNotable: all.length > 0,
+    text: all.join(', '),
+  }
 }
 
 export type Thumb = { start: number; size: number }
@@ -485,8 +523,12 @@ export const taskCountsOf = (text: string) => {
     .split('\n')
     .map(line => CHECKBOX.exec(line))
     .filter(match => match !== null)
-  return { done: boxes.filter(match => match[1] !== ' ').length, total: boxes.length }
+  if (boxes.length > 0) return { done: boxes.filter(match => match[1] !== ' ').length, total: boxes.length }
+  const statuses = [...outlineOf(text).statuses.values()]
+  return { done: statuses.filter(status => status === 'done').length, total: statuses.length }
 }
+
+const hasCheckboxes = (text: string) => normalize(text).split('\n').some(line => CHECKBOX.test(line))
 
 const tasksLabelOf = (source: TasksSource) => {
   if (!source.exists) return 'set up'
@@ -788,8 +830,10 @@ const isSeenFor = (value: unknown, path: string): value is Seen =>
   typeof (value as Seen).hash === 'string' &&
   typeof (value as Seen).text === 'string'
 
-export const tasksInstructionOf = (path: string) =>
-  `If you are the main session, not a subagent or a teammate, keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
+export const tasksInstructionOf = (path: string, source?: TasksSource) =>
+  source?.exists && !source.isTooLarge && source.text !== '' && !hasCheckboxes(source.text)
+    ? `If you are the main session, not a subagent or a teammate, your task list is in ${path}; keep its current format.`
+    : `If you are the main session, not a subagent or a teammate, keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
 
 export const resolvePath = (path: string, root: string, home: string) => {
   const expanded = home !== '' && (path === '~' || path.startsWith('~/')) ? `${home}${path.slice(1)}` : path
@@ -1231,7 +1275,8 @@ export const register: Register = (on, options) => {
   on('prompt.compose', async ($, e, next) => {
     const result = await next(e)
     if (!isLead || tasksPath === '' || e.traits.includes('teammate')) return result
-    return { sections: [...result.sections, { id: 'pending-questions:tasks', text: tasksInstructionOf(tasksPath), scope: 'session' as const }] }
+    const text = tasksInstructionOf(tasksPath, await read($, tasks))
+    return { sections: [...result.sections, { id: 'pending-questions:tasks', text, scope: 'session' as const }] }
   }).catch(($, e, next) => {
     logDebug($, 'the tasks instruction was left out of the system prompt')
     return next(e)

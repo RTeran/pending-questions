@@ -45,7 +45,17 @@ something by hand, provide a credential.
 ## Tasks
 
 The Tasks section shows the file where the agent keeps its task list. The file has no required
-format; only Markdown checkboxes (`- [ ]` and `- [x]`) and headings matter for notifications.
+format. Two kinds of file are understood:
+
+- A checklist: Markdown checkboxes (`- [ ]` and `- [x]`) under any headings.
+- A file with no checkboxes where each task is a heading with a `status:` line under it, like the
+  `TASKS.md` that a ClickUp sync writes:
+
+  ```markdown
+  ## T-12 Fix the login
+  - status: in_progress
+  - branch: fix-login-12
+  ```
 
 - The file is, in this order:
   1. the path you picked in the pane for this project,
@@ -57,11 +67,17 @@ format; only Markdown checkboxes (`- [ ]` and `- [x]`) and headings matter for n
   saves your answer for the project. **Not this session** hides the question until the next
   session. The pane keeps watching the path, so the section appears when the file is created.
 - The pane checks the file every 5 seconds and right after the agent writes or edits it.
-- A change notifies you only when it is a checkbox that changed state, a new checkbox or a new
-  heading, and only once the file has kept that content for two checks. Any other edit refreshes
-  the pane silently. A missing, unreadable or larger than 4 MiB file never counts as a change.
-- The main session's system prompt says: "If you are the main session, not a subagent or a
-  teammate, keep your task list in `<path>`, using `- [ ]` / `- [x]` checkboxes."
+- A change notifies you only when it is a checkbox that changed state, a new checkbox, a new
+  heading or a `status:` line that changed (shown as `T-12 status: in_progress → done`), and only
+  once the file has kept that content for two checks. Any other edit, such as a `branch:` or
+  `depends_on:` line, refreshes the pane silently. A missing, unreadable or larger than 4 MiB file
+  never counts as a change.
+- The Tasks button and the status line count checkboxes done out of all checkboxes; in a file with
+  no checkboxes, they count tasks whose status is `done` out of all tasks with a status.
+- The main session's system prompt names the file. When the file is missing or has checkboxes,
+  it says: "If you are the main session, not a subagent or a teammate, keep your task list in
+  `<path>`, using `- [ ]` / `- [x]` checkboxes." When the file has content but no checkboxes, it
+  says: "…your task list is in `<path>`; keep its current format."
 
 ## Notifications
 

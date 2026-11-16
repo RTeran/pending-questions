@@ -14,6 +14,7 @@ import {
   isUnknownSound,
   normalize,
   summarizeChange,
+  taskCountsOf,
   listRows,
   rowsOf,
   spansDays,
@@ -2009,5 +2010,74 @@ describe('menu review', () => {
     fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [x] two\n')
     await clock.advance(10_000)
     expect(alerts).toHaveLength(2)
+  })
+})
+
+const CLICKUP = [
+  '## T-12 Fix the login',
+  '- clickup: 12 | url: https://app.clickup.com/t/12',
+  '- status: in_progress',
+  '- depends_on: ',
+  '- branch: fix-login-12',
+  'Done criteria: users can log in.',
+  '',
+  '## T-13 Add the export',
+  '- clickup: 13 | url: https://app.clickup.com/t/13',
+  '- status: pending',
+  '- depends_on: T-12',
+  '- branch: ',
+  '',
+].join('\n')
+
+describe('ClickUp-format tasks', () => {
+  test('a status change is a notable change named after its task', async () => {
+    const next = CLICKUP.replace('- status: in_progress', '-  Status :  done ')
+    expect(summarizeChange(CLICKUP, next)).toMatchObject({ statuses: 1, isNotable: true, text: 'T-12 status: in_progress → done' })
+  })
+
+  test('edits to other fields are not notable', async () => {
+    const next = CLICKUP.replace('- depends_on: T-12', '- depends_on: T-12, T-14').replace('- branch: fix-login-12', '- branch: other')
+    expect(summarizeChange(CLICKUP, next).isNotable).toBe(false)
+  })
+
+  test('several status changes are counted', async () => {
+    const next = CLICKUP.replace('in_progress', 'qa').replace('status: pending', 'status: in_progress')
+    expect(summarizeChange(CLICKUP, next).text).toBe('T-12 status: in_progress → qa, T-13 status: pending → in_progress')
+    const third = `${CLICKUP}\n## T-14 Third\n- status: pending\n`
+    expect(summarizeChange(third, third.replace(/status: \w+/g, 'status: done')).text).toBe('3 status changes')
+  })
+
+  test('without checkboxes the count is of status done items', async () => {
+    expect(taskCountsOf(CLICKUP.replace('status: pending', 'status: done'))).toEqual({ done: 1, total: 2 })
+    expect(taskCountsOf('# Notes\nnothing here\n')).toEqual({ done: 0, total: 0 })
+  })
+
+  test('the prompt line keeps a file without checkboxes in its own format', async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', { '/repo/TASKS.md': CLICKUP })
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toBe(
+      'If you are the main session, not a subagent or a teammate, your task list is in /repo/TASKS.md; keep its current format.',
+    )
+  })
+
+  test('the prompt line asks for checkboxes when the file is missing or has them', async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ ...START, isInteractive: false })
+    expect(await taskSection($ as never)).toMatch(/keep your task list in \/repo\/TASKS\.md, using/)
+  })
+
+  test('a status change notifies after two stable polls and other edits do not', async ($, on) => {
+    const { fs, clock, toasts, statuses } = engine(on, {}, 'main\n', false, 'ok', { '/repo/TASKS.md': CLICKUP })
+    await $.session.start(START)
+    expect(statuses.at(-1)).toBe('📋 0/2 tasks · /questions')
+    fs.write('/repo/TASKS.md', CLICKUP.replace('- branch: fix-login-12', '- branch: renamed'))
+    await clock.advance(15_000)
+    expect(toasts.filter(text => /status/.test(text))).toEqual([])
+    fs.write('/repo/TASKS.md', CLICKUP.replace('- branch: fix-login-12', '- branch: renamed').replace('status: in_progress', 'status: done'))
+    await clock.advance(5_000)
+    expect(toasts.filter(text => /status/.test(text))).toEqual([])
+    await clock.advance(5_000)
+    expect(toasts).toContain('T-12 status: in_progress → done')
+    expect(statuses.at(-1)).toBe('📋 1/2 tasks · /questions')
   })
 })
