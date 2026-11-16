@@ -18,7 +18,6 @@ const view = atom({ plugin: 'pending-questions', key: 'view' } as const, { kind:
   shape: 'view-2',
 })
 const LIST: View = { kind: 'list' }
-const ACTIONS: View = { kind: 'actions' }
 
 const NO_TASKS: TasksSource = {
   path: '',
@@ -441,6 +440,7 @@ async function noteSessionEnd($: Engine, reason: string) {
 async function replaceLists($: Engine, keys: { open: string; actions: string }) {
   await update($, questions, () => [])
   await update($, actions, () => [])
+  await update($, unseen, () => ({ questions: false, actions: false, tasks: false }))
   await update($, view, () => LIST)
   await restoreLists($, keys)
 }
@@ -516,7 +516,25 @@ async function openSection($: Engine, section: Section) {
   await update($, view, () => VIEW_OF[section])
 }
 
-// While the human is in a question or an action, the pane stays put: the change is marked on
+async function leaveDetail($: Engine, kind: 'question' | 'action', n: number) {
+  let isLeft = false
+  await update($, view, current => {
+    isLeft = current.kind === kind && current.n === n
+    return isLeft ? VIEW_OF[sectionOf(current)] : current
+  })
+  if (isLeft) await update($, unseen, marks => ({ ...marks, [kind === 'question' ? 'questions' : 'actions']: false }))
+}
+
+async function isPaneShown($: Engine) {
+  try {
+    return (await $.ui.panes()).some(pane => pane.id === PANE && pane.isShown)
+  } catch (error) {
+    logDebug($, `the pane state could not be read: ${String(error)}`)
+    return false
+  }
+}
+
+// While the human is in a question or an action on a shown pane, the pane stays put: the change is marked on
 // its menu button instead. Tasks then make no sound either, as they are never urgent.
 async function notifyChange($: Engine, sound: Sound, section: Section, text?: string) {
   try {
@@ -528,7 +546,7 @@ async function notifyChange($: Engine, sound: Sound, section: Section, text?: st
 
 async function showChange($: Engine, sound: Sound, section: Section, text?: string) {
   const shown = await read($, view)
-  const isInDetail = shown.kind === 'question' || shown.kind === 'action'
+  const isInDetail = (shown.kind === 'question' || shown.kind === 'action') && (await isPaneShown($))
   if (isInDetail) await update($, unseen, marks => ({ ...marks, [section]: true }))
   if (!isInDetail || section !== 'tasks') {
     try {
@@ -557,7 +575,7 @@ async function removeAction($: Engine, n: number) {
     return isRemoved ? all.filter(a => a.n !== n) : all
   })
   if (!isRemoved) return false
-  await update($, view, current => (current.kind === 'action' && current.n === n ? ACTIONS : current))
+  await leaveDetail($, 'action', n)
   await save($)
   return true
 }
@@ -572,7 +590,7 @@ async function markDone($: Engine, n: number) {
     const a = (await read($, actions)).find(one => one.n === n)
     if (!a || a.queuedAt) return
     await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: new Date().toISOString() } : one)))
-    await update($, view, () => ACTIONS)
+    await openSection($, 'actions')
     await save($)
     await $.prompt.submit({ text: doneTextOf(n), asUser: true })
     isSent = true
@@ -604,7 +622,7 @@ async function resolveQuestion($: Engine, n: number) {
     return isRemoved ? all.filter(q => q.n !== n) : all
   })
   if (!isRemoved) return
-  await update($, view, current => (current.kind === 'question' && current.n === n ? LIST : current))
+  await leaveDetail($, 'question', n)
   await save($)
   $.ui.toast(`Q${n} answered.`)
 }
@@ -626,7 +644,7 @@ async function send($: Engine, n: number, raw: string) {
     await update($, questions, all =>
       all.map(one => (one.n === n ? { ...one, draft: answer, queuedAt: new Date().toISOString() } : one)),
     )
-    await update($, view, () => LIST)
+    await openSection($, 'questions')
     await save($)
     await $.prompt.submit({ text: answerTextOf(q, answer), asUser: true })
     isSent = true
@@ -657,7 +675,7 @@ async function sendThroughChat($: Engine, n: number, raw: string) {
   const { text: typed } = await $.prompt.read()
   const text = answerTextOf(q, raw)
   await $.prompt.fill(typed.trim() === '' ? { text, mode: 'replace' } : { text: `\n\n${text}`, mode: 'append' })
-  await update($, view, () => LIST)
+  await openSection($, 'questions')
   $.ui.toast(`The answer to Q${n} is in the prompt: press Enter to send it.`)
 }
 
@@ -827,7 +845,7 @@ async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
 async function dismissTasksSetup($: Engine) {
   try {
     await update($, tasks, t => ({ ...t, isDismissed: true }))
-    await update($, view, () => LIST)
+    await openSection($, 'questions')
   } catch (error) {
     logDebug($, `the tasks setup could not be dismissed: ${String(error)}`)
     $.ui.toast('Could not close the setup. Try again.')
@@ -1022,7 +1040,7 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'questions' }, async $ => {
-    await update($, view, () => LIST)
+    await openSection($, 'questions')
     await $.ui.open({ id: PANE, title: TITLE })
     const count = (await read($, questions)).length
     const todo = (await read($, actions)).length
@@ -1071,7 +1089,7 @@ export const register: Register = (on, options) => {
     const list = await read($, questions)
     if (typeof n !== 'number' || !list.some(q => q.n === n)) return { deny: `There is no pending Q${String(n)}.` }
     await update($, questions, all => all.filter(q => q.n !== n))
-    await update($, view, current => (current.kind === 'question' && current.n === n ? LIST : current))
+    await leaveDetail($, 'question', n)
     await save($)
     return { result: `Q${n} removed from the pane.` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))

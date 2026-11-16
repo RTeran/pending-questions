@@ -176,6 +176,10 @@ const engine = (
     titles.push(e.title ?? '')
     return { value: { isPlaced: true } }
   })
+  let isPaneShown = true
+  on('ui.panes', () => ({
+    value: isPaneShown ? [{ id: 'pending-questions', title: 'Agent inbox', isShown: true, isFocused: false, isPlaced: true }] : [],
+  }))
   on('ui.scroll', () => ({}))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
@@ -196,6 +200,9 @@ const engine = (
     },
     failStoreWritesAfterSubmit: () => {
       isStoreFailingAfterSubmit = true
+    },
+    hidePane: () => {
+      isPaneShown = false
     },
     clear: (nextId: string) => {
       sessionId = nextId
@@ -1757,6 +1764,64 @@ describe('menu', () => {
 })
 
 describe('notifications', () => {
+  test('a new question opens the pane even when it was closed on a question', async ($, on) => {
+    const { control, opened } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    control.hidePane()
+    const before = opened.length
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(opened).toHaveLength(before + 1)
+    expect(await ui.find({ type: 'Button', key: 'q-2' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a new question while a shown pane is on a question keeps the view', async ($, on) => {
+    const { opened } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    const before = opened.length
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(opened).toHaveLength(before)
+    expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the new mark clears whenever the section list comes back, and only for that section', async ($, on) => {
+    const { clock } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect((await navTexts(ui))['nav-questions']).toBe('▸ ❓ Questions (2) (new)')
+
+    await ui.input({ key: 'answer-1', text: 'yes', kind: 'submit' })
+    await clock.settle()
+    expect(await navTexts(ui)).toMatchObject({
+      'nav-questions': '▸ ❓ Questions (1)',
+      'nav-actions': '🛠 Actions (1) (new)',
+    })
+    await ui.unmount()
+  })
+
+  test('the menu draws on every surface', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect(await ui.find({ type: 'Button', key: 'nav-questions' })).toBeDefined()
+      expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+      await ui.unmount()
+    }
+  })
+
   test('a new item opens its own section', async ($, on) => {
     engine(on)
     await $.session.start(START)
