@@ -43,6 +43,8 @@ const PANE = {
 
 const ALERT = ['/usr/bin/osascript', '-e', 'beep']
 
+const TASKS = '# Tasks\n- [ ] one\n- [ ] two\n'
+
 type AlertOutcome = 'ok' | 'exit' | 'reject'
 
 const engine = (
@@ -51,8 +53,32 @@ const engine = (
   probe = 'main\n',
   playFails = false,
   alert: AlertOutcome = 'ok',
+  initialFiles: Record<string, string> = { '/repo/TASKS.md': TASKS },
 ) => {
   const submitted: string[] = []
+  const files = new Map(Object.entries(initialFiles).map(([path, text]) => [path, { text, mtimeMs: 1 }]))
+  let writes = 1
+  let isReadFailing = false
+  const fs = {
+    write: (path: string, text: string) => void files.set(path, { text, mtimeMs: ++writes }),
+    remove: (path: string) => void files.delete(path),
+    failReads: () => {
+      isReadFailing = true
+    },
+  }
+  on('session.root', () => ({ value: '/repo' }))
+  on('fs.stat', (_, e) => {
+    const file = files.get(e.path)
+    if (!file) throw new Error(`ENOENT: ${e.path}`)
+    return { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
+  })
+  on('fs.read', (_, e) => {
+    const file = files.get(e.path)
+    if (!file || isReadFailing) throw new Error(`ENOENT: ${e.path}`)
+    return { value: file.text }
+  })
+  on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }] }))
+  on('tool.call', () => ({ result: 'written' }))
   const plays: unknown[] = []
   const alerts: (readonly string[])[] = []
   const logs: string[] = []
@@ -84,7 +110,11 @@ const engine = (
   on('session.id', () => ({ value: 'session-1' }))
   const clock = mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
-  on('ui.toast', () => ({ value: undefined }))
+  const toasts: string[] = []
+  on('ui.toast', (_, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   on('command.register', (_, e) => {
     commands.push(e.name)
     return { value: { command: e.name } }
@@ -105,7 +135,7 @@ const engine = (
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { submitted, clock, tools, commands, plays, alerts, logs, opened }
+  return { submitted, clock, tools, commands, plays, alerts, logs, opened, toasts, fs }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -186,7 +216,7 @@ test('the list opens a question from its title, not from its date', async ($, on
   await $.tool.call({ tool: OPEN, question: 'Do I delete the old branch?' })
 
   const ui = await $.ui.mount(PANE)
-  const buttons = await ui.findAll({ type: 'Button' })
+  const buttons = (await ui.findAll({ type: 'Button' })).filter(button => button.key?.startsWith('q-'))
   expect(buttons).toHaveLength(1)
   expect(buttons[0]?.key).toBe('q-1')
   expect(buttons[0]?.text).toBe('Do I delete the old branch?')
@@ -371,8 +401,8 @@ describe('scrollbar', () => {
     expect(await ui.findAll({ type: 'Text', text: /^[│█]$/ })).toHaveLength(5)
     expect(await thumbRows(ui)).toEqual([0])
 
-    await ui.redraw(sized(5, 12).props)
-    expect((await ui.find({ type: 'Box', key: 'scrollbar' }))?.props).toMatchObject({ top: 12 })
+    await ui.redraw(sized(5, 14).props)
+    expect((await ui.find({ type: 'Box', key: 'scrollbar' }))?.props).toMatchObject({ top: 14 })
     expect(await thumbRows(ui)).toEqual([4])
     await ui.unmount()
   })
@@ -665,7 +695,7 @@ describe('scrollbar cache', () => {
 
     const ui = await $.ui.mount(sized(5))
     await $.ui.scroll(scrolled(12, 5, 40))
-    await ui.redraw({ ...sized(5, 12).props, bodyColumns: 50 })
+    await ui.redraw({ ...sized(5, 14).props, bodyColumns: 50 })
     expect(await thumbRows(ui)).toEqual([4])
     await ui.unmount()
   })
@@ -888,5 +918,222 @@ describe('tasks helpers', () => {
     expect(summarizeChange('Intro\n- [ ] a\n- [ ] b\n', 'Intro, longer\n- [ ] a\n').isNotable).toBe(false)
     expect(summarizeChange('# A\n', '# A\nsome notes\n').isNotable).toBe(false)
     expect(summarizeChange('- [ ] a\n', '- [ ] a\n').text).toBe('')
+  })
+})
+
+const START = { cwd: '/repo', surface: 'terminal', isInteractive: true } as const
+
+const taskSection = async ($: { prompt: { compose: (args: object) => Promise<{ sections: readonly { id: string; text: string }[] }> } }, args: object = {}) =>
+  (
+    await $.prompt.compose({
+      model: 'claude-test',
+      promptModel: 'claude-test',
+      surfaces: ['terminal'],
+      tools: [],
+      outputStyle: null,
+      traits: [],
+      ...args,
+    })
+  ).sections.find(section => section.id === 'pending-questions:tasks')?.text
+
+describe('tasks source', () => {
+  test('a path stored for the project wins over the option and the default', { options: { tasksFile: 'plan/todo.md' } }, async ($, on) => {
+    engine(on, { 'tasksFile:/repo': '/repo/notes/tasks.md' }, 'main\n', false, 'ok', { '/repo/notes/tasks.md': TASKS })
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toBe('Keep your task list in /repo/notes/tasks.md, using `- [ ]` / `- [x]` checkboxes.')
+  })
+
+  test('the option is used when the project has no stored path', { options: { tasksFile: 'plan/todo.md' } }, async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', { '/repo/plan/todo.md': TASKS })
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toMatch(/in \/repo\/plan\/todo\.md,/)
+  })
+
+  test('TASKS.md under the project root is the default', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toMatch(/in \/repo\/TASKS\.md,/)
+  })
+
+  test('a teammate prompt gets no task instruction', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    expect(await taskSection($ as never, { traits: ['teammate'] })).toBeUndefined()
+  })
+
+  test('a teammate process gets no task instruction and no polling', async ($, on) => {
+    const { alerts } = engine(on, {}, 'teammate\n', false, 'ok', {})
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toBeUndefined()
+    expect(alerts).toEqual([])
+  })
+
+  test('the tasks file is shown in the pane', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+    expect((await ui.find({ type: 'Markdown' }))?.props).toMatchObject({ text: TASKS })
+    await ui.press({ key: 'to-questions' })
+    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+describe('tasks setup', () => {
+  test('a missing file opens the setup card with one chime', async ($, on) => {
+    const { alerts, opened } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+    await $.session.start(START)
+    expect(alerts).toEqual([ALERT])
+    expect(opened).toEqual(['pending-questions'])
+
+    const ui = await $.ui.mount(PANE)
+    expect((await ui.find({ type: 'Input', key: 'tasks-path' }))?.props).toMatchObject({ value: '/repo/TASKS.md' })
+    await ui.unmount()
+  })
+
+  test('using a path stores it for the project and shows that file', async ($, on) => {
+    const { fs } = engine(on, {}, 'main\n', false, 'ok', {})
+    fs.write('/repo/docs/todo.md', TASKS)
+    await $.session.start(START)
+
+    const ui = await $.ui.mount(PANE)
+    await ui.input({ key: 'tasks-path', text: 'docs/todo.md', kind: 'change' })
+    await ui.press({ key: 'tasks-use' })
+    expect((await ui.find({ type: 'Markdown' }))?.props).toMatchObject({ text: TASKS })
+    await ui.unmount()
+
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toMatch(/in \/repo\/docs\/todo\.md,/)
+  })
+
+  test('dismissing hides the card and the file is shown once it appears', async ($, on) => {
+    const { fs, clock, alerts } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'tasks-dismiss' })
+    expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'to-tasks' })).toBeUndefined()
+
+    fs.write('/repo/TASKS.md', 'Plan notes\n')
+    await clock.advance(5_000)
+    await ui.press({ key: 'to-tasks' })
+    expect((await ui.find({ type: 'Markdown' }))?.props).toMatchObject({ text: 'Plan notes\n' })
+    expect(alerts).toHaveLength(1)
+    await ui.unmount()
+  })
+})
+
+describe('tasks notifications', () => {
+  test('a task checked off notifies after two stable polls', async ($, on) => {
+    const { fs, clock, alerts, toasts } = engine(on)
+    await $.session.start(START)
+    expect(alerts).toEqual([])
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [x] two\n- [ ] three\n')
+    await clock.advance(5_000)
+    expect(alerts).toEqual([])
+    await clock.advance(5_000)
+    expect(alerts).toEqual([ALERT])
+    expect(toasts).toContain('2 tasks done, 1 added')
+
+    const ui = await $.ui.mount(PANE)
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/three/)
+    await ui.unmount()
+  })
+
+  test('an edit in the middle of a burst waits for the file to settle', async ($, on) => {
+    const { fs, clock, alerts, toasts } = engine(on)
+    await $.session.start(START)
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(5_000)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [x] two\n')
+    await clock.advance(5_000)
+    expect(alerts).toEqual([])
+    await clock.advance(5_000)
+    expect(alerts).toEqual([ALERT])
+    expect(toasts).toContain('2 tasks done')
+  })
+
+  test('an unrelated edit refreshes the pane without a sound', async ($, on) => {
+    const { fs, clock, alerts, opened } = engine(on)
+    await $.session.start(START)
+    fs.write('/repo/TASKS.md', 'Some notes first.\n# Tasks\n- [ ] one\n')
+    await clock.advance(15_000)
+    expect(alerts).toEqual([])
+    expect(opened).toEqual([])
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/Some notes first/)
+    await ui.unmount()
+  })
+
+  test('a silent edit moves the baseline, so a later check counts only itself', async ($, on) => {
+    const { fs, clock, toasts } = engine(on)
+    await $.session.start(START)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [ ] one\n')
+    await clock.advance(15_000)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n')
+    await clock.advance(15_000)
+    expect(toasts.filter(text => /task/.test(text))).toEqual(['1 task done'])
+  })
+
+  test('a restart on an unchanged file is silent', async ($, on) => {
+    const seen = { hash: hashOf(normalize(TASKS)), text: normalize(TASKS) }
+    const { clock, alerts } = engine(on, { 'tasksSeen:/repo': seen })
+    await $.session.start(START)
+    await clock.advance(15_000)
+    expect(alerts).toEqual([])
+  })
+
+  test('a restart after the file changed notifies what changed', async ($, on) => {
+    const before = '# Tasks\n- [ ] one\n'
+    const { clock, alerts, toasts } = engine(on, { 'tasksSeen:/repo': { hash: hashOf(before), text: before } })
+    await $.session.start(START)
+    await clock.advance(5_000)
+    expect(alerts).toEqual([ALERT])
+    expect(toasts).toContain('1 task added')
+  })
+
+  test('the tasks sound has its own gap and does not hold back a question', async ($, on) => {
+    const { fs, clock, alerts } = engine(on)
+    await $.session.start(START)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(10_000)
+    expect(alerts).toHaveLength(1)
+    await clock.advance(500)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(alerts).toHaveLength(2)
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [x] two\n')
+    await clock.advance(10_000)
+    expect(alerts).toHaveLength(2)
+  })
+
+  test('a Write to the tasks file refreshes the pane at once', async ($, on) => {
+    const { fs } = engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [ ] written now\n')
+    const result = await $.tool.call({ tool: 'Write', file_path: '/repo/TASKS.md', content: '' } as never)
+    expect(result.result).toBe('written')
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/written now/)
+    await ui.unmount()
+  })
+
+  test('a refresh that fails does not change the Write result', async ($, on) => {
+    const { fs } = engine(on)
+    await $.session.start(START)
+    fs.failReads()
+    fs.write('/repo/TASKS.md', 'x')
+    const result = await $.tool.call({ tool: 'Edit', file_path: '/repo/TASKS.md', old_string: 'a', new_string: 'b' } as never)
+    expect(result.result).toBe('written')
+    expect(result.deny).toBeUndefined()
   })
 })

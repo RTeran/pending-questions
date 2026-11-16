@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Action, Option, Question, ScrollCache, View } from '../types'
+import type { Action, Option, Question, ScrollCache, TasksSource, View } from '../types'
 
 const PANE = 'pending-questions'
 const TITLE = 'Pending questions'
@@ -19,6 +19,19 @@ const view = atom({ plugin: 'pending-questions', key: 'view' } as const, { kind:
 })
 const LIST: View = { kind: 'list' }
 const ACTIONS: View = { kind: 'actions' }
+
+const NO_TASKS: TasksSource = {
+  path: '',
+  exists: false,
+  text: '',
+  hash: '',
+  isTooLarge: false,
+  draft: '',
+  isDismissed: false,
+  isSetupAsked: false,
+}
+const tasks = atom({ plugin: 'pending-questions', key: 'tasks' } as const, NO_TASKS, { shape: 'tasks-1' })
+const TASKS_VIEW: View = { kind: 'tasks' }
 
 const actions = atom({ plugin: 'pending-questions', key: 'actions' } as const, [] as Action[], {
   shape: 'actions-1',
@@ -309,8 +322,10 @@ const dingOf = (seconds: number, hz: number) =>
 
 export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav' } as const
 
-const SOUND_GAP_MS = 1_000
-let lastSoundAt = -Infinity
+export type SoundGate = 'inbox' | 'tasks'
+
+const SOUND_GAP_MS: Record<SoundGate, number> = { inbox: 1_000, tasks: 60_000 }
+const lastSoundAt: Record<SoundGate, number> = { inbox: -Infinity, tasks: -Infinity }
 
 const logDebug = ($: Engine, text: string) => {
   try {
@@ -340,12 +355,16 @@ async function playAlert($: Engine) {
   if (exitCode !== 0) logSoundFailure($, `osascript exit code ${exitCode}: ${stderr.trim()}`)
 }
 
-export async function chime($: Engine, sound: Sound): Promise<{ played: Promise<void> | undefined }> {
+export async function chime(
+  $: Engine,
+  sound: Sound,
+  gate: SoundGate = 'inbox',
+): Promise<{ played: Promise<void> | undefined }> {
   if (sound === 'off') return { played: undefined }
   try {
     const at = await $.clock.now()
-    if (at - lastSoundAt < SOUND_GAP_MS) return { played: undefined }
-    lastSoundAt = at
+    if (at - lastSoundAt[gate] < SOUND_GAP_MS[gate]) return { played: undefined }
+    lastSoundAt[gate] = at
   } catch (error) {
     logSoundFailure($, error)
     return { played: undefined }
@@ -462,6 +481,124 @@ const TEAMMATE_PROBE = [
   'echo main',
 ].join('\n')
 
+const TASKS_POLL_MS = 5_000
+const TASKS_MAX_BYTES = 4 * 1024 * 1024
+const STABLE_POLLS = 2
+
+type Snapshot = { hash: string; text: string }
+
+const isSnapshot = (value: unknown): value is Snapshot =>
+  typeof (value as Snapshot | undefined)?.hash === 'string' && typeof (value as Snapshot | undefined)?.text === 'string'
+
+export const tasksInstructionOf = (path: string) =>
+  `Keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
+
+const absoluteOf = (path: string, root: string) => (path.startsWith('/') ? path : `${root.replace(/\/+$/, '')}/${path}`)
+
+let isLead = false
+let tasksRoot = ''
+let tasksPath = ''
+let lastStat = ''
+let current: Snapshot = { hash: hashOf(''), text: '' }
+let committed: Snapshot | undefined
+let pending = { hash: '', count: 0 }
+let polling: { cancel: () => void } | undefined
+let observing: Promise<void> = Promise.resolve()
+
+async function readTasks($: Engine) {
+  let stat: { size: number; mtimeMs: number; kind: string } | undefined
+  try {
+    stat = await $.fs.stat(tasksPath)
+  } catch {
+    stat = undefined
+  }
+  if (!stat || stat.kind !== 'file') {
+    lastStat = ''
+    current = { hash: hashOf(''), text: '' }
+    await update($, tasks, t => ({ ...t, exists: false, text: '', hash: '', isTooLarge: false }))
+    return
+  }
+  const key = `${stat.size}:${stat.mtimeMs}`
+  if (key === lastStat) return
+  const isTooLarge = stat.size > TASKS_MAX_BYTES
+  const raw = isTooLarge ? '' : await $.fs.read(tasksPath)
+  const text = normalize(typeof raw === 'string' ? raw : '')
+  lastStat = key
+  current = { hash: hashOf(text), text }
+  await update($, tasks, t => ({ ...t, exists: true, text, hash: current.hash, isTooLarge }))
+}
+
+async function commit($: Engine, next: Snapshot) {
+  committed = next
+  pending = { hash: '', count: 0 }
+  await $.store.set(`tasksSeen:${tasksRoot}`, next)
+}
+
+async function notifyTasks($: Engine, sound: Sound, text: string) {
+  await chime($, sound, 'tasks')
+  await update($, view, () => TASKS_VIEW)
+  void $.ui.open({ id: PANE, title: TITLE })
+  $.ui.toast(text)
+}
+
+async function observeTasks($: Engine, sound: Sound, isPoll: boolean) {
+  await readTasks($)
+  if (!committed) return commit($, current)
+  if (!isPoll) return
+  if (current.hash === committed.hash) {
+    pending = { hash: '', count: 0 }
+    return
+  }
+  pending = pending.hash === current.hash ? { hash: current.hash, count: pending.count + 1 } : { hash: current.hash, count: 1 }
+  if (pending.count < STABLE_POLLS) return
+  const change = summarizeChange(committed.text, current.text)
+  await commit($, current)
+  if (change.isNotable) await notifyTasks($, sound, change.text)
+}
+
+function observe($: Engine, sound: Sound, isPoll: boolean) {
+  observing = observing
+    .then(() => observeTasks($, sound, isPoll))
+    .catch(error => logDebug($, `the tasks file could not be read: ${String(error)}`))
+  return observing
+}
+
+async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
+  const typed = raw.trim()
+  if (typed === '') {
+    $.ui.toast('Write the path of the tasks file first.')
+    return
+  }
+  const path = absoluteOf(typed, tasksRoot)
+  await $.store.set(`tasksFile:${tasksRoot}`, path)
+  await update($, view, () => TASKS_VIEW)
+  await useTasksPath($, sound, path)
+}
+
+async function dismissTasksSetup($: Engine) {
+  await update($, tasks, t => ({ ...t, isDismissed: true }))
+  await update($, view, () => LIST)
+}
+
+async function refreshOnWrite($: Engine, sound: Sound, filePath: unknown) {
+  try {
+    if (isLead && typeof filePath === 'string' && absoluteOf(filePath, tasksRoot) === tasksPath) await observe($, sound, false)
+  } catch {
+    // A refresh is a courtesy: it must never change what the Write or Edit answered.
+  }
+}
+
+async function useTasksPath($: Engine, sound: Sound, path: string) {
+  tasksPath = path
+  lastStat = ''
+  committed = undefined
+  pending = { hash: '', count: 0 }
+  const seen = await $.store.get(`tasksSeen:${tasksRoot}`)
+  if (isSnapshot(seen)) committed = seen
+  await update($, tasks, t => ({ ...t, path, draft: path }))
+  await observe($, sound, true)
+}
+
 export async function isTeammateProcess($: Engine) {
   try {
     const { stdout } = await $.process.run(['/bin/sh', '-c', TEAMMATE_PROBE], { timeoutMs: 3000 })
@@ -577,6 +714,22 @@ export const register: Register = (on, options) => {
 
     await $.command.register({ name: 'questions', description: 'Opens the pending questions pane' })
 
+    isLead = true
+    tasksRoot = await $.session.root()
+    const storedPath = await $.store.get(`tasksFile:${tasksRoot}`)
+    const optionPath = typeof options.tasksFile === 'string' ? options.tasksFile.trim() : ''
+    const path = typeof storedPath === 'string' && storedPath !== '' ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
+    await useTasksPath($, sound, absoluteOf(path, tasksRoot))
+    const source = await read($, tasks)
+    if (!source.exists && !source.isDismissed && !source.isSetupAsked) {
+      await update($, tasks, t => ({ ...t, isSetupAsked: true }))
+      await update($, view, () => ({ kind: 'tasks-setup' }) as View)
+      await chime($, sound, 'tasks')
+      void $.ui.open({ id: PANE, title: TITLE })
+    }
+    polling?.cancel()
+    polling = $.clock.every(TASKS_POLL_MS, () => void observe($, sound, true))
+
     if ((await read($, questions)).length === 0) {
       const stored = await $.store.get(storeKey)
       if (isQuestionList(stored) && stored.length > 0) {
@@ -688,6 +841,24 @@ export const register: Register = (on, options) => {
     return { result: `A${n} removed from the pane.` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
 
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => {
+    const result = await next(e)
+    await refreshOnWrite($, sound, e.file_path)
+    return result
+  })
+
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => {
+    const result = await next(e)
+    await refreshOnWrite($, sound, e.file_path)
+    return result
+  })
+
+  on('prompt.compose', async ($, e, next) => {
+    const result = await next(e)
+    if (!isLead || tasksPath === '' || e.traits.includes('teammate')) return result
+    return { sections: [...result.sections, { id: 'pending-questions:tasks', text: tasksInstructionOf(tasksPath), scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
+
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
     if (e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
@@ -710,9 +881,10 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button, Input } = $.ui.resolve(e)
+    const { Box, Text, Button, Input, Markdown } = $.ui.resolve(e)
     const list = await read($, questions)
     const todo = await read($, actions)
+    const source = await read($, tasks)
     const current = await read($, view)
     const stamp = await read($, now)
     const at = stamp ? new Date(stamp) : new Date()
@@ -742,6 +914,61 @@ export const register: Register = (on, options) => {
               )}
             </Box>
           )}
+        </Box>
+      )
+    }
+
+    if ((current.kind === 'tasks' || current.kind === 'tasks-setup') && source.exists) {
+      const body = source.isTooLarge
+        ? `${source.path} is larger than 4 MiB, so it is not shown.`
+        : source.text === ''
+          ? `${source.path} is empty.`
+          : undefined
+      return withScrollbar(
+        `tasks:${source.hash}:${source.isTooLarge ? 'large' : ''}`,
+        stackRows([1, rowsOf(source.path, columns), body === undefined ? rowsOf(source.text, columns) : rowsOf(body, columns)]),
+        <Box flexDirection="column" gap={1}>
+          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
+            ← Questions ({list.length})
+          </Button>
+          <Text dimColor>{source.path}</Text>
+          {body === undefined ? <Markdown text={source.text} /> : <Text dimColor>{body}</Text>}
+        </Box>,
+      )
+    }
+
+    if (current.kind === 'tasks' || current.kind === 'tasks-setup') {
+      drawnKey = ''
+      return (
+        <Box flexDirection="column" gap={1}>
+          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
+            ← Questions ({list.length})
+          </Button>
+          <Text>There is no tasks file at {source.path}. Where does the agent keep its task list?</Text>
+          <Input
+            key="tasks-path"
+            label="Tasks file"
+            placeholder="A path, relative to the project or absolute"
+            value={source.draft}
+            submitLabel="use"
+            onInput={value => void update($, tasks, t => ({ ...t, draft: value }))}
+            onSubmit={value => void chooseTasksPath($, sound, value)}
+          />
+          <Box flexDirection="row" gap={1}>
+            <Button
+              key="tasks-use"
+              variant="primary"
+              onPress={async () => {
+                const { draft } = await read($, tasks)
+                await chooseTasksPath($, sound, draft)
+              }}
+            >
+              Use this path
+            </Button>
+            <Button key="tasks-dismiss" onPress={() => void dismissTasksSetup($)}>
+              Not this session
+            </Button>
+          </Box>
         </Box>
       )
     }
@@ -880,11 +1107,21 @@ export const register: Register = (on, options) => {
       )
     }
 
+    const hasTasksEntry = source.exists || (source.path !== '' && !source.isDismissed)
     const toActions =
-      todo.length > 0 ? (
-        <Button key="to-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
-          🛠 Actions ({todo.length}) →
-        </Button>
+      todo.length > 0 || hasTasksEntry ? (
+        <Box flexDirection="row" gap={2}>
+          {todo.length > 0 && (
+            <Button key="to-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
+              🛠 Actions ({todo.length}) →
+            </Button>
+          )}
+          {hasTasksEntry && (
+            <Button key="to-tasks" plain onPress={() => void update($, view, () => TASKS_VIEW)}>
+              📋 Tasks →
+            </Button>
+          )}
+        </Box>
       ) : undefined
 
     if (list.length === 0) {
@@ -901,7 +1138,7 @@ export const register: Register = (on, options) => {
 
     const showDays = spansDays(list, at)
     return withScrollbar(
-      `list:${showDays ? 'days' : 'today'}:${todo.length > 0 ? 'actions:' : ''}${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      `list:${showDays ? 'days' : 'today'}:${toActions ? 'nav:' : ''}${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
       listRows(list, at, columns) + (toActions ? 2 : 0),
       <Box flexDirection="column" gap={1}>
         {toActions}

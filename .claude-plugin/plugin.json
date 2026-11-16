@@ -26,6 +26,12 @@
         "off"
       ],
       "default": "alert"
+    },
+    "tasksFile": {
+      "type": "string",
+      "title": "Tasks file",
+      "description": "The file the agent keeps its task list in, relative to the project root or absolute. Empty means TASKS.md at the project root. A path picked in the pane for a project wins over this.",
+      "default": ""
     }
   }
 }
