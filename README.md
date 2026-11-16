@@ -9,9 +9,10 @@ questions get lost. This Claude Code mod keeps what the agent needs from you in 
 - **Actions**: things only you can do outside the chat, such as merging a pull request.
 
 A row at the top of the pane shows each section that holds something, for example
-`❓ Questions (2)  📋 Tasks 3/5  🛠 Actions (1)`. The open section is marked with `▸`. A section that
-changed while you were looking at another one shows `(new)` until you open it. When nothing is
-pending, the pane says so.
+`❓ Questions (2)  📋 Tasks 3/5  🛠 Actions (1)`. The open section is marked with `▸`. When something
+changes, the pane jumps to that section; only while you are reading a question or an action does
+it stay put and mark the changed section `(new)` until you open it. A section with nothing in it
+is not shown. When nothing is pending, the pane says so.
 
 ## Questions
 
@@ -66,13 +67,13 @@ format; only Markdown checkboxes (`- [ ]` and `- [x]`) and headings matter for n
 
 - A new question, a new action or a notable task change plays a sound and opens the pane on that
   section. If you are reading a question or an action at that moment, the pane stays where it is
-  and the section's button shows `(new)`.
+  and the section's button shows `(new)`; a task change then makes no sound.
 - Each section has its own pause between sounds: 1 second for questions and actions, 1 minute for
   tasks.
 - The plugin's `sound` option picks the sound, on macOS:
   - `alert` (the default) plays the macOS alert sound you chose in System Settings > Sound. It
     ignores each terminal's own bell mute.
-  - `ding` plays a short built-in tone through `afplay`.
+  - `ding` plays a short built-in tone.
   - `off` plays nothing.
 
   A sound that fails to play is written to the debug log.
