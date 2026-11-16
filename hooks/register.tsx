@@ -215,12 +215,26 @@ export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav'
 const SOUND_GAP_MS = 1_000
 let lastSoundAt = -Infinity
 
-const logSoundFailure = ($: Engine, error: unknown) =>
-  $.ui.log(`pending-questions: the new-question sound did not play: ${String(error)}`, { to: 'debug' })
+const logDebug = ($: Engine, text: string) => {
+  try {
+    $.ui.log(`pending-questions: ${text}`, { to: 'debug' })
+  } catch {
+    // A sound is a courtesy: losing its log line must not fail the question.
+  }
+}
+
+const logSoundFailure = ($: Engine, error: unknown) => logDebug($, `the new-question sound did not play: ${String(error)}`)
 
 export type Sound = 'alert' | 'ding' | 'off'
 
-export const soundOf = (raw: unknown): Sound => (raw === 'ding' || raw === 'off' ? raw : 'alert')
+const SOUNDS: readonly unknown[] = ['alert', 'ding', 'off']
+
+export const soundOf = (raw: unknown): Sound => {
+  if (raw === false) return 'off'
+  return SOUNDS.includes(raw) ? (raw as Sound) : 'alert'
+}
+
+export const isUnknownSound = (raw: unknown) => raw !== undefined && raw !== false && !SOUNDS.includes(raw)
 
 const ALERT_ARGV = ['/usr/bin/osascript', '-e', 'beep']
 
@@ -229,19 +243,20 @@ async function playAlert($: Engine) {
   if (exitCode !== 0) logSoundFailure($, `osascript exit code ${exitCode}: ${stderr.trim()}`)
 }
 
-export async function chime($: Engine, sound: Sound) {
-  if (sound === 'off') return
+export async function chime($: Engine, sound: Sound): Promise<{ played: Promise<void> | undefined }> {
+  if (sound === 'off') return { played: undefined }
   try {
     const at = await $.clock.now()
-    if (at - lastSoundAt < SOUND_GAP_MS) return
+    if (at - lastSoundAt < SOUND_GAP_MS) return { played: undefined }
     lastSoundAt = at
   } catch (error) {
     logSoundFailure($, error)
-    return
+    return { played: undefined }
   }
-  void Promise.resolve()
+  const played = Promise.resolve()
     .then(() => (sound === 'alert' ? playAlert($) : $.audio.play(ACK_SOUND)))
     .catch(error => logSoundFailure($, error))
+  return { played }
 }
 
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
@@ -325,9 +340,15 @@ export async function isTeammateProcess($: Engine) {
 
 export const register: Register = (on, options) => {
   const sound = soundOf(options.sound)
+  let isSoundOptionReported = false
 
   on('session.start', async ($, e, next) => {
     if (await isTeammateProcess($)) return next(e)
+
+    if (!isSoundOptionReported && isUnknownSound(options.sound)) {
+      isSoundOptionReported = true
+      logDebug($, `unknown sound option ${JSON.stringify(options.sound)}; playing the alert`)
+    }
 
     const sessionId = await $.session.id()
     storeKey = `open:${sessionId}`

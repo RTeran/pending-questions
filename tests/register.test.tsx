@@ -10,6 +10,7 @@ import {
   soundOf,
   detailRows,
   groupByDay,
+  isUnknownSound,
   listRows,
   rowsOf,
   spansDays,
@@ -448,6 +449,15 @@ describe('sound', () => {
     expect(soundOf(undefined)).toBe('alert')
     expect(soundOf('trumpet')).toBe('alert')
     expect(soundOf(true)).toBe('alert')
+    expect(soundOf(false)).toBe('off')
+  })
+
+  test('only a value that is not a known sound is reported as unknown', async () => {
+    expect(isUnknownSound('trumpet')).toBe(true)
+    expect(isUnknownSound(true)).toBe(true)
+    expect(isUnknownSound(undefined)).toBe(false)
+    expect(isUnknownSound(false)).toBe(false)
+    expect(isUnknownSound('ding')).toBe(false)
   })
 
   test('by default a new question plays the macOS alert once', async ($, on) => {
@@ -547,9 +557,7 @@ describe('sound', () => {
       },
       ui: { log: (text: string) => void logged.push(text) },
     }
-    await chime($ as never, 'ding')
-    await Promise.resolve()
-    await Promise.resolve()
+    await (await chime($ as never, 'ding')).played
     expect(logged).toHaveLength(1)
     expect(logged[0]).toMatch(/no audio noun/)
   })
@@ -565,10 +573,43 @@ describe('sound', () => {
       },
       ui: { log: (text: string) => void logged.push(text) },
     }
-    await chime($ as never, 'alert')
-    for (let i = 0; i < 10; i++) await Promise.resolve()
+    await (await chime($ as never, 'alert')).played
     expect(logged).toHaveLength(1)
     expect(logged[0]).toMatch(/no process noun/)
+  })
+
+  test('a failing sound with a failing log still settles', async () => {
+    const $ = {
+      clock: { now: async () => 3e15 },
+      audio: {
+        play: () => {
+          throw new Error('no audio noun')
+        },
+      },
+      ui: {
+        log: () => {
+          throw new Error('no log noun')
+        },
+      },
+    }
+    const { played } = await chime($ as never, 'ding')
+    await expect(played).resolves.toBeUndefined()
+  })
+
+  test('a clock that fails with a failing log still settles', async () => {
+    const $ = {
+      clock: {
+        now: async () => {
+          throw new Error('no clock')
+        },
+      },
+      ui: {
+        log: () => {
+          throw new Error('no log noun')
+        },
+      },
+    }
+    await expect(chime($ as never, 'alert')).resolves.toEqual({ played: undefined })
   })
 
   test('a ding that cannot play still registers the question', { options: { sound: 'ding' } }, async ($, on) => {
