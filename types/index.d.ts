@@ -29,8 +29,11 @@ export type TasksSource = {
   draft: string
   isDismissed: boolean
   isSetupAsked: boolean
-  isUnseen: boolean
 }
+
+export type Section = 'questions' | 'actions' | 'tasks'
+
+export type Unseen = Record<Section, boolean>
 
 export type ChainState = { id: string; seen: string; endReason: string }
 
@@ -51,6 +54,7 @@ declare module 'claude-code' {
       actions: Shaped<Action[]>
       tasks: Shaped<TasksSource>
       chain: Shaped<ChainState>
+      unseen: Shaped<Unseen>
       view: Shaped<View>
       now: string
       scroll: Shaped<ScrollCache>

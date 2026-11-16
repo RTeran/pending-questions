@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Action, ChainState, Option, Question, ScrollCache, TasksSource, View } from '../types'
+import type { Action, ChainState, Option, Question, ScrollCache, Section, TasksSource, Unseen, View } from '../types'
 
 const PANE = 'pending-questions'
-const TITLE = 'Pending questions'
+const TITLE = 'Agent inbox'
 const OPEN_TOOL = 'mcp__pending-questions__question_open'
 const CLOSE_TOOL = 'mcp__pending-questions__question_close'
 const ACTION_OPEN_TOOL = 'mcp__pending-questions__action_open'
@@ -29,10 +29,13 @@ const NO_TASKS: TasksSource = {
   draft: '',
   isDismissed: false,
   isSetupAsked: false,
-  isUnseen: false,
 }
 const tasks = atom({ plugin: 'pending-questions', key: 'tasks' } as const, NO_TASKS, { shape: 'tasks-1' })
-const TASKS_VIEW: View = { kind: 'tasks' }
+const unseen = atom(
+  { plugin: 'pending-questions', key: 'unseen' } as const,
+  { questions: false, actions: false, tasks: false } as Unseen,
+  { shape: 'unseen-1' },
+)
 
 const actions = atom({ plugin: 'pending-questions', key: 'actions' } as const, [] as Action[], {
   shape: 'actions-1',
@@ -323,10 +326,8 @@ const dingOf = (seconds: number, hz: number) =>
 
 export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav' } as const
 
-export type SoundGate = 'inbox' | 'tasks'
-
-const SOUND_GAP_MS: Record<SoundGate, number> = { inbox: 1_000, tasks: 60_000 }
-const lastSoundAt: Record<SoundGate, number> = { inbox: -Infinity, tasks: -Infinity }
+const SOUND_GAP_MS: Record<Section, number> = { questions: 1_000, actions: 1_000, tasks: 60_000 }
+const lastSoundAt: Record<Section, number> = { questions: -Infinity, actions: -Infinity, tasks: -Infinity }
 
 const logDebug = ($: Engine, text: string) => {
   try {
@@ -359,7 +360,7 @@ async function playAlert($: Engine) {
 export async function chime(
   $: Engine,
   sound: Sound,
-  gate: SoundGate = 'inbox',
+  gate: Section = 'questions',
 ): Promise<{ played: Promise<void> | undefined }> {
   if (sound === 'off') return { played: undefined }
   try {
@@ -471,26 +472,82 @@ async function save($: Engine) {
   const todo = await read($, actions)
   await $.store.set(keys.open, list)
   await $.store.set(keys.actions, todo)
+  await refreshStatus($)
+}
+
+export const taskCountsOf = (text: string) => {
+  const boxes = normalize(text)
+    .split('\n')
+    .map(line => CHECKBOX.exec(line))
+    .filter(match => match !== null)
+  return { done: boxes.filter(match => match[1] !== ' ').length, total: boxes.length }
+}
+
+const tasksLabelOf = (source: TasksSource) => {
+  if (!source.exists) return 'set up'
+  const { done, total } = taskCountsOf(source.isTooLarge ? '' : source.text)
+  return total === 0 ? '' : `${done}/${total}`
+}
+
+async function refreshStatus($: Engine) {
+  const list = await read($, questions)
+  const todo = await read($, actions)
+  const source = await read($, tasks)
+  const counts = source.exists && !source.isTooLarge ? taskCountsOf(source.text) : { done: 0, total: 0 }
   const parts = [
-    ...(list.length > 0 ? [`❓ ${countOf(list.length, 'pending question', 'pending questions')}`] : []),
-    ...(todo.length > 0 ? [`🛠 ${countOf(todo.length, 'pending action', 'pending actions')}`] : []),
+    ...(list.length > 0 ? [`❓ ${countOf(list.length, 'question', 'questions')}`] : []),
+    ...(todo.length > 0 ? [`🛠 ${countOf(todo.length, 'action', 'actions')}`] : []),
+    ...(counts.total > 0 ? [`📋 ${counts.done}/${counts.total} tasks`] : []),
   ]
   $.ui.status(parts.length === 0 ? undefined : `${parts.join(' · ')} · /questions`)
+}
+
+const VIEW_OF: Record<Section, View> = { questions: { kind: 'list' }, actions: { kind: 'actions' }, tasks: { kind: 'tasks' } }
+
+export const sectionOf = (shown: View): Section =>
+  shown.kind === 'actions' || shown.kind === 'action'
+    ? 'actions'
+    : shown.kind === 'tasks' || shown.kind === 'tasks-setup'
+      ? 'tasks'
+      : 'questions'
+
+async function openSection($: Engine, section: Section) {
+  await update($, unseen, marks => ({ ...marks, [section]: false }))
+  await update($, view, () => VIEW_OF[section])
+}
+
+// While the human is in a question or an action, the pane stays put: the change is marked on
+// its menu button instead. Tasks then make no sound either, as they are never urgent.
+async function notifyChange($: Engine, sound: Sound, section: Section, text?: string) {
+  try {
+    await showChange($, sound, section, text)
+  } catch (error) {
+    logDebug($, `the ${section} change could not be shown: ${String(error)}`)
+  }
+}
+
+async function showChange($: Engine, sound: Sound, section: Section, text?: string) {
+  const shown = await read($, view)
+  const isInDetail = shown.kind === 'question' || shown.kind === 'action'
+  if (isInDetail) await update($, unseen, marks => ({ ...marks, [section]: true }))
+  if (!isInDetail || section !== 'tasks') {
+    try {
+      await chime($, sound, section)
+    } catch (error) {
+      logSoundFailure($, error)
+    }
+  }
+  if (!isInDetail) {
+    await openSection($, section)
+    openPane($)
+  }
+  if (text) $.ui.toast(text)
 }
 
 function openPane($: Engine) {
   Promise.resolve()
     .then(() => $.ui.open({ id: PANE, title: TITLE }))
     .catch(error => logDebug($, `the pane did not open: ${String(error)}`))
-}
-
-async function announce($: Engine, sound: Sound) {
-  try {
-    await chime($, sound)
-  } catch (error) {
-    logSoundFailure($, error)
-  }
-  openPane($)
 }
 
 async function removeAction($: Engine, n: number) {
@@ -667,6 +724,7 @@ async function markMissing($: Engine) {
   lastStat = ''
   lastReadError = ''
   await update($, tasks, t => ({ ...t, exists: false, isTooLarge: false }))
+  await refreshStatus($)
 }
 
 // A missing, oversized or unreadable file is never taken as an empty one: the baseline stays,
@@ -693,6 +751,7 @@ async function readTasks($: Engine): Promise<'fresh' | 'unchanged' | 'unusable'>
     lastStat = key
     lastReadError = ''
     await update($, tasks, t => ({ ...t, exists: true, isTooLarge: true }))
+    await refreshStatus($)
     return 'unusable'
   }
   let raw: unknown
@@ -711,6 +770,7 @@ async function readTasks($: Engine): Promise<'fresh' | 'unchanged' | 'unusable'>
   lastReadError = ''
   current = { hash: hashOf(text), text }
   await update($, tasks, t => ({ ...t, exists: true, text, hash: current.hash, isTooLarge: false }))
+  await refreshStatus($)
   return 'fresh'
 }
 
@@ -722,24 +782,6 @@ async function commit($: Engine, next: Snapshot) {
   } catch (error) {
     logDebug($, `the tasks baseline could not be saved: ${String(error)}`)
   }
-}
-
-async function openTasksView($: Engine) {
-  await update($, tasks, t => ({ ...t, isUnseen: false }))
-  await update($, view, () => TASKS_VIEW)
-}
-
-async function notifyTasks($: Engine, sound: Sound, text: string) {
-  const shown = await read($, view)
-  if (shown.kind === 'question' || shown.kind === 'action') {
-    await update($, tasks, t => ({ ...t, isUnseen: true }))
-    $.ui.toast(text)
-    return
-  }
-  await chime($, sound, 'tasks')
-  await openTasksView($)
-  openPane($)
-  $.ui.toast(text)
 }
 
 async function observeTasks($: Engine, sound: Sound, isPoll: boolean) {
@@ -755,7 +797,7 @@ async function observeTasks($: Engine, sound: Sound, isPoll: boolean) {
   if (pending.count < STABLE_POLLS) return
   const change = summarizeChange(committed.text, current.text)
   await commit($, current)
-  if (change.isNotable) await notifyTasks($, sound, change.text)
+  if (change.isNotable) await notifyChange($, sound, 'tasks', change.text)
 }
 
 function observe($: Engine, sound: Sound, isPoll: boolean) {
@@ -774,7 +816,7 @@ async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
   try {
     const path = resolvePath(typed, tasksRoot, homeDir)
     await $.store.set(`tasksFile:${tasksRoot}`, path)
-    await openTasksView($)
+    await openSection($, 'tasks')
     await useTasksPath($, sound, path)
   } catch (error) {
     logDebug($, `the tasks path could not be used: ${String(error)}`)
@@ -843,7 +885,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'question_open',
       description: [
-        'Register a question or a decision for the human in the "pending questions" side pane.',
+        'Register a question or a decision for the human in the "Agent inbox" side pane.',
         'Use it only for secondary ones: a question you need answered, or a decision that is the human\'s to make, that you can keep working without, because the answer refines the result but blocks no step you are about to take. Register it, then keep working on whatever does not depend on the answer.',
         'A question or decision you cannot go on without, or whose answer would change what you are about to do, is not secondary: ask it with AskUserQuestion, which stops the session until the human answers, and do not register it here as well.',
         'The pane keeps the question, with the date and time it was asked, until the human answers.',
@@ -891,7 +933,7 @@ export const register: Register = (on, options) => {
     await $.tool.register({
       name: 'action_open',
       description: [
-        'Register an action for the human in the "pending questions" side pane: something only the human can do outside the chat, such as merging a pull request, testing something by hand or providing a credential.',
+        'Register an action for the human in the "Agent inbox" side pane: something only the human can do outside the chat, such as merging a pull request, testing something by hand or providing a credential.',
         'Register it, then keep working on whatever does not depend on it.',
         'The pane keeps the action, with the date and time it was registered, until the human marks it done.',
         'When it is done, a user message starting with "[A<n> · done]" arrives; it may arrive while you are busy with something else.',
@@ -926,7 +968,7 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
 
-    await $.command.register({ name: 'questions', description: 'Opens the pending questions pane' })
+    await $.command.register({ name: 'questions', description: 'Opens the Agent inbox pane' })
 
     isLead = true
     try {
@@ -1017,7 +1059,7 @@ export const register: Register = (on, options) => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
-    await announce($, sound)
+    await notifyChange($, sound, 'questions')
 
     return {
       result: `Registered as Q${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until answered. Refer to it as Q${n}.`,
@@ -1058,7 +1100,7 @@ export const register: Register = (on, options) => {
     }
     await update($, actions, all => [...all, entry])
     await save($)
-    await announce($, sound)
+    await notifyChange($, sound, 'actions')
 
     return {
       result: `Registered as A${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until marked done. Refer to it as A${n}.`,
@@ -1157,33 +1199,71 @@ export const register: Register = (on, options) => {
       )
     }
 
-    if ((current.kind === 'tasks' || current.kind === 'tasks-setup') && source.exists) {
-      const body = source.isTooLarge
+    const marks = await read($, unseen)
+    const section = sectionOf(current)
+    const tasksLabel = tasksLabelOf(source)
+    const hasTasks = source.exists || (source.path !== '' && !source.isDismissed)
+    const entries = [
+      { section: 'questions' as const, label: `❓ Questions (${list.length})`, isShown: list.length > 0 },
+      { section: 'tasks' as const, label: `📋 Tasks${tasksLabel === '' ? '' : tasksLabel === 'set up' ? ' (set up)' : ` ${tasksLabel}`}`, isShown: hasTasks },
+      { section: 'actions' as const, label: `🛠 Actions (${todo.length})`, isShown: todo.length > 0 },
+    ]
+      .filter(entry => entry.isShown || entry.section === section)
+      .map(entry => ({
+        ...entry,
+        text: `${entry.section === section ? '▸ ' : ''}${entry.label}${marks[entry.section] ? ' (new)' : ''}`,
+      }))
+
+    if (list.length === 0 && todo.length === 0 && !hasTasks && current.kind !== 'question' && current.kind !== 'action') {
+      drawnKey = ''
+      return <Text dimColor>Nothing pending: no questions, actions or tasks.</Text>
+    }
+
+    const nav = (
+      <Box key="nav" flexDirection="row" flexWrap="wrap" columnGap={2}>
+        {entries.map(entry => (
+          <Button key={`nav-${entry.section}`} plain onPress={() => void openSection($, entry.section)}>
+            <Text bold={entry.section === section} color={entry.section === section ? 'suggestion' : undefined}>
+              {entry.text}
+            </Text>
+          </Button>
+        ))}
+      </Box>
+    )
+    const navRows = rowsOf(entries.map(entry => entry.text).join('  '), columns)
+    const page = (key: string, estimate: number, content: RenderNode) =>
+      withScrollbar(
+        `${key}:nav:${entries.map(entry => entry.text).join('|')}`,
+        stackRows([navRows, estimate]),
+        <Box flexDirection="column" gap={1}>
+          {nav}
+          {content}
+        </Box>,
+      )
+
+    if (section === 'tasks' && source.exists) {
+      const notice = source.isTooLarge
         ? `${source.path} is larger than 4 MiB, so it is not shown.`
         : source.text === ''
           ? `${source.path} is empty.`
           : undefined
-      return withScrollbar(
+      return page(
         `tasks:${source.hash}:${source.isTooLarge ? 'large' : ''}`,
-        stackRows([1, rowsOf(source.path, columns), body === undefined ? rowsOf(source.text, columns) : rowsOf(body, columns)]),
+        stackRows([rowsOf(source.path, columns), rowsOf(notice ?? source.text, columns)]),
         <Box flexDirection="column" gap={1}>
-          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
-            ← Questions ({list.length})
-          </Button>
           <Text dimColor>{source.path}</Text>
-          {body === undefined ? <Markdown text={source.text} /> : <Text dimColor>{body}</Text>}
+          {notice === undefined ? <Markdown text={source.text} /> : <Text dimColor>{notice}</Text>}
         </Box>,
       )
     }
 
-    if (current.kind === 'tasks' || current.kind === 'tasks-setup') {
-      drawnKey = ''
-      return (
+    if (section === 'tasks') {
+      const prompt = `There is no tasks file at ${source.path}. Where does the agent keep its task list?`
+      return page(
+        `tasks-setup:${source.path}`,
+        stackRows([rowsOf(prompt, columns), 3, 1]),
         <Box flexDirection="column" gap={1}>
-          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
-            ← Questions ({list.length})
-          </Button>
-          <Text>There is no tasks file at {source.path}. Where does the agent keep its task list?</Text>
+          <Text>{prompt}</Text>
           <Input
             key="tasks-path"
             label="Tasks file"
@@ -1208,19 +1288,19 @@ export const register: Register = (on, options) => {
               Not this session
             </Button>
           </Box>
-        </Box>
+        </Box>,
       )
     }
 
-    if (current.kind === 'actions' || current.kind === 'action') {
+    if (section === 'actions') {
       const openAction = current.kind === 'action' ? todo.find(a => a.n === current.n) : undefined
       if (openAction) {
         const n = openAction.n
-        return withScrollbar(
+        return page(
           `a:${n}:${openAction.queuedAt ? 'sent' : 'open'}`,
           actionDetailRows(openAction, at, columns),
           <Box flexDirection="column" gap={1}>
-            <Button key="back-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
+            <Button key="back-actions" plain onPress={() => void openSection($, 'actions')}>
               ← All actions
             </Button>
             <Box flexDirection="column">
@@ -1241,17 +1321,14 @@ export const register: Register = (on, options) => {
           </Box>,
         )
       }
-      return withScrollbar(
+      return page(
         `actions:${todo.map(a => `${a.n}${a.queuedAt ? 's' : ''}`).join(',')}`,
         actionListRows(todo, at, columns),
-        <Box flexDirection="column" gap={1}>
-          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
-            ← Questions ({list.length})
-          </Button>
-          {todo.length === 0 ? (
-            <Text dimColor>No pending actions.</Text>
-          ) : (
-            [...todo]
+        todo.length === 0 ? (
+          <Text dimColor>No pending actions.</Text>
+        ) : (
+          <Box flexDirection="column" gap={1}>
+            {[...todo]
               .sort((a, b) => a.askedAt.localeCompare(b.askedAt))
               .map(a => (
                 <Box flexDirection="column">
@@ -1266,19 +1343,19 @@ export const register: Register = (on, options) => {
                     <Text wrap="wrap">{a.action}</Text>
                   </Button>
                 </Box>
-              ))
-          )}
-        </Box>,
+              ))}
+          </Box>
+        ),
       )
     }
 
     if (open) {
       const n = open.n
-      return withScrollbar(
+      return page(
         `q:${n}:${open.queuedAt ? 'sent' : 'open'}`,
         detailRows(open, at, columns),
         <Box flexDirection="column" gap={1}>
-          <Button key="back" plain onPress={() => void update($, view, () => LIST)}>
+          <Button key="back" plain onPress={() => void openSection($, 'questions')}>
             ← All questions
           </Button>
           <Box flexDirection="column">
@@ -1346,41 +1423,13 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const hasTasksEntry = source.exists || (source.path !== '' && !source.isDismissed)
-    const toActions =
-      todo.length > 0 || hasTasksEntry ? (
-        <Box flexDirection="row" gap={2}>
-          {todo.length > 0 && (
-            <Button key="to-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
-              🛠 Actions ({todo.length}) →
-            </Button>
-          )}
-          {hasTasksEntry && (
-            <Button key="to-tasks" plain onPress={() => void openTasksView($)}>
-              📋 Tasks{source.isUnseen ? ' (new)' : ''} →
-            </Button>
-          )}
-        </Box>
-      ) : undefined
-
-    if (list.length === 0) {
-      drawnKey = ''
-      return toActions ? (
-        <Box flexDirection="column" gap={1}>
-          {toActions}
-          <Text dimColor>No pending questions.</Text>
-        </Box>
-      ) : (
-        <Text dimColor>No pending questions.</Text>
-      )
-    }
+    if (list.length === 0) return page('questions:none', 1, <Text dimColor>No pending questions.</Text>)
 
     const showDays = spansDays(list, at)
-    return withScrollbar(
-      `list:${showDays ? 'days' : 'today'}:${toActions ? 'nav:' : ''}${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
-      listRows(list, at, columns) + (toActions ? 2 : 0),
+    return page(
+      `list:${showDays ? 'days' : 'today'}:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      listRows(list, at, columns),
       <Box flexDirection="column" gap={1}>
-        {toActions}
         {groupByDay(list, at).map(group => (
           <Box flexDirection="column" gap={1}>
             {showDays && <Text dimColor>── {group.label} ──</Text>}

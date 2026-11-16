@@ -41,6 +41,9 @@ const PANE = {
   },
 } as const
 
+const navTexts = async (ui: { findAll: (q: { type: string }) => Promise<readonly { key?: string; text?: string }[]> }) =>
+  Object.fromEntries((await ui.findAll({ type: 'Button' })).filter(b => b.key?.startsWith('nav-')).map(b => [b.key, b.text]))
+
 const ALERT = ['/usr/bin/osascript', '-e', 'beep']
 
 const TASKS = '# Tasks\n- [ ] one\n- [ ] two\n'
@@ -148,7 +151,11 @@ const engine = (
   on('session.id', () => ({ value: sessionId }))
   on('session.end', (_, e) => ({ sessionId: e.sessionId }))
   const clock = mock.clock(on)
-  on('ui.status', () => ({ value: undefined }))
+  const statuses: (string | undefined)[] = []
+  on('ui.status', (_, e) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
   const toasts: string[] = []
   on('ui.toast', (_, e) => {
     toasts.push(e.text)
@@ -163,8 +170,10 @@ const engine = (
     return { value: { tool: e.name } }
   })
   const opened: string[] = []
+  const titles: string[] = []
   on('ui.open', (_, e) => {
     opened.push(e.id)
+    titles.push(e.title ?? '')
     return { value: { isPlaced: true } }
   })
   on('ui.scroll', () => ({}))
@@ -202,7 +211,7 @@ const engine = (
       return release
     },
   }
-  return { storeReads, submitted, pluginSubmits, clock, tools, commands, plays, alerts, logs, opened, toasts, fs, store, control }
+  return { statuses, titles, storeReads, submitted, pluginSubmits, clock, tools, commands, plays, alerts, logs, opened, toasts, fs, store, control }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -543,9 +552,12 @@ describe('scrollbar', () => {
   })
 
   test('the empty state has no scrollbar', async ($, on) => {
-    engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: false })
     const ui = await $.ui.mount(sized(1))
+    await ui.press({ key: 'nav-tasks' })
+    await ui.press({ key: 'tasks-dismiss' })
+    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
     expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
     await ui.unmount()
   })
@@ -796,7 +808,7 @@ describe('scrollbar cache', () => {
     await $.ui.scroll(scrolled(12, 5, 40))
     await ui.redraw(sized(5, 0).props)
     await ui.press({ key: 'q-1' })
-    expect(await thumbRows(ui)).toEqual([0, 1, 2])
+    expect(await thumbRows(ui)).toEqual([0, 1])
     await ui.unmount()
   })
 })
@@ -819,7 +831,7 @@ describe('actions', () => {
     control.failSubmits()
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     await ui.press({ key: 'a-1' })
     await ui.press({ key: 'action-done' })
     await clock.settle()
@@ -835,7 +847,7 @@ describe('actions', () => {
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     await ui.press({ key: 'a-1' })
     control.failStoreWritesAfterSubmit()
     await ui.press({ key: 'action-done' })
@@ -854,7 +866,7 @@ describe('actions', () => {
     const release = control.holdSubmits()
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     await ui.press({ key: 'a-1' })
     await ui.press({ key: 'action-done' })
     await ui.press({ key: 'a-1' })
@@ -884,7 +896,7 @@ describe('actions', () => {
     } as never)
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
     await ui.unmount()
   })
@@ -935,8 +947,7 @@ describe('actions', () => {
     await $.tool.call({ tool: ACTION_OPEN, action: 'Merge PR #8', context: 'CI is green.', url: 'https://github.com/x/y/pull/8' })
 
     const ui = await $.ui.mount(PANE)
-    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
-    await ui.press({ key: 'to-actions' })
+    expect((await navTexts(ui))['nav-actions']).toBe('▸ 🛠 Actions (1)')
     expect((await ui.find({ type: 'Button', key: 'a-1' }))?.text).toBe('Merge PR #8')
 
     await ui.press({ key: 'a-1' })
@@ -961,8 +972,9 @@ describe('actions', () => {
     await $.prompt.submit({ text: '[A1 · done]', wait: false, origin: { kind: 'composer' } })
 
     const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'a-2' })).toBeDefined()
     await ui.unmount()
@@ -978,7 +990,7 @@ describe('actions', () => {
 
     const ui = await $.ui.mount(PANE)
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
     await ui.unmount()
   })
@@ -991,7 +1003,7 @@ describe('actions', () => {
     await $.prompt.submit({ text: '[A1 · done]', wait: false, origin: { kind: 'peer' } as never })
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
     await ui.unmount()
   })
@@ -1033,13 +1045,13 @@ describe('actions', () => {
     expect(opened).toEqual(['pending-questions'])
   })
 
-  test('a question and an action less than a second apart play once', async ($, on) => {
+  test('a question and an action less than a second apart each play', async ($, on) => {
     const { alerts, clock } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'one' })
     await clock.advance(500)
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
-    expect(alerts).toHaveLength(1)
+    expect(alerts).toHaveLength(2)
   })
 
   test('stored actions are restored without a sound and without their queued mark', async ($, on) => {
@@ -1051,7 +1063,7 @@ describe('actions', () => {
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Text', text: /queued/ })).toBeUndefined()
     await ui.press({ key: 'a-3' })
     expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeDefined()
@@ -1068,12 +1080,11 @@ describe('actions', () => {
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     await ui.press({ key: 'a-1' })
     await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
     expect((await ui.find({ type: 'Text', text: /No pending actions/ }))?.text).toBe('No pending actions.')
-    await ui.press({ key: 'to-questions' })
-    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
+    expect(await navTexts(ui)).toEqual({ 'nav-tasks': '📋 Tasks 0/2', 'nav-actions': '▸ 🛠 Actions (0)' })
     await ui.unmount()
   })
 })
@@ -1178,10 +1189,9 @@ describe('tasks source', () => {
     engine(on)
     await $.session.start(START)
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect((await ui.find({ type: 'Markdown' }))?.props).toMatchObject({ text: TASKS })
-    await ui.press({ key: 'to-questions' })
-    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
+    expect((await navTexts(ui))['nav-tasks']).toBe('▸ 📋 Tasks 0/2')
     await ui.unmount()
   })
 })
@@ -1228,11 +1238,11 @@ describe('tasks setup', () => {
     const ui = await $.ui.mount(PANE)
     await ui.press({ key: 'tasks-dismiss' })
     expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeUndefined()
-    expect(await ui.find({ type: 'Button', key: 'to-tasks' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'nav-tasks' })).toBeUndefined()
 
     fs.write('/repo/TASKS.md', 'Plan notes\n')
     await clock.advance(5_000)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect((await ui.find({ type: 'Markdown' }))?.props).toMatchObject({ text: 'Plan notes\n' })
     expect(alerts).toHaveLength(1)
     await ui.unmount()
@@ -1280,7 +1290,7 @@ describe('tasks notifications', () => {
     expect(opened).toEqual([])
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/Some notes first/)
     await ui.unmount()
   })
@@ -1353,7 +1363,7 @@ describe('tasks notifications', () => {
     const { fs } = engine(on)
     await $.session.start(START)
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
 
     fs.write('/repo/TASKS.md', '# Tasks\n- [ ] written now\n')
     const result = await $.tool.call({ tool: 'Write', file_path: '/repo/TASKS.md', content: '' } as never)
@@ -1392,10 +1402,11 @@ describe('a /clear', () => {
     await $.prompt.submit(answer('[Q1 · asked 2026-11-11 10:42] ok'))
     await $.prompt.submit(answer('[A1 · done]'))
     const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'q-2' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'q-3' })).toBeDefined()
-    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'nav-actions' })
     expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'a-2' })).toBeDefined()
     await ui.unmount()
@@ -1415,6 +1426,7 @@ describe('a /clear', () => {
     expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })).result)).toMatch(/^Registered as A2,/)
 
     const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
     await ui.unmount()
   })
@@ -1467,6 +1479,7 @@ describe('a /clear', () => {
     expect(store.get('open:session-1')).toMatchObject([{ n: 1 }])
 
     const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'q-5' })).toBeDefined()
     await ui.unmount()
@@ -1499,6 +1512,7 @@ describe('a /clear', () => {
     expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'next' })).result)).toMatch(/^Registered as A3,/)
     expect(store.get('seq:session-1')).toBeUndefined()
     const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'nav-questions' })
     expect(await ui.find({ type: 'Button', key: 'q-13' })).toBeDefined()
     await ui.unmount()
   })
@@ -1516,7 +1530,7 @@ describe('tasks review', () => {
     expect(toasts.filter(text => /task/.test(text))).toEqual([])
 
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect(await ui.find({ type: 'Text', text: /larger than 4 MiB/ })).toBeDefined()
     await ui.unmount()
 
@@ -1550,7 +1564,7 @@ describe('tasks review', () => {
     fs.remove('/repo/TASKS.md')
     await clock.advance(5_000)
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeDefined()
     await ui.unmount()
   })
@@ -1564,7 +1578,7 @@ describe('tasks review', () => {
     expect(logs.filter(line => /tasks file .* could not be read/.test(line))).toHaveLength(1)
     expect(toasts.filter(text => /task/.test(text))).toEqual([])
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
     expect((await ui.find({ type: 'Markdown' }))?.props.text).toBe(TASKS)
     await ui.unmount()
   })
@@ -1594,7 +1608,7 @@ describe('tasks review', () => {
     const { fs } = engine(on)
     await $.session.start(START)
     const ui = await $.ui.mount(PANE)
-    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'nav-tasks' })
 
     fs.write('/repo/TASKS.md', '# Tasks\n- [ ] via relative\n')
     await $.tool.call({ tool: 'Write', file_path: 'docs/../TASKS.md', content: '' } as never)
@@ -1649,10 +1663,10 @@ describe('tasks review', () => {
     expect(alerts).toHaveLength(before.alerts)
 
     await ui.press({ key: 'back' })
-    expect((await ui.find({ type: 'Button', key: 'to-tasks' }))?.text).toMatch(/new/)
-    await ui.press({ key: 'to-tasks' })
-    await ui.press({ key: 'to-questions' })
-    expect((await ui.find({ type: 'Button', key: 'to-tasks' }))?.text).not.toMatch(/new/)
+    expect((await ui.find({ type: 'Button', key: 'nav-tasks' }))?.text).toMatch(/new/)
+    await ui.press({ key: 'nav-tasks' })
+    await ui.press({ key: 'nav-questions' })
+    expect((await ui.find({ type: 'Button', key: 'nav-tasks' }))?.text).not.toMatch(/new/)
     await ui.unmount()
   })
 
@@ -1684,5 +1698,104 @@ describe('tasks review', () => {
     expect(await ui.find({ type: 'Button', key: 'q-7' })).toBeDefined()
     await ui.unmount()
     expect(String((await $.tool.call({ tool: OPEN, question: 'next' })).result)).toMatch(/^Registered as Q8,/)
+  })
+})
+
+describe('menu', () => {
+  test('the menu shows each section that has something and marks the open one', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    expect(await navTexts(ui)).toEqual({ 'nav-questions': '▸ ❓ Questions (1)', 'nav-tasks': '📋 Tasks 0/2' })
+
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    await ui.press({ key: 'nav-questions' })
+    expect(await navTexts(ui)).toEqual({
+      'nav-questions': '▸ ❓ Questions (1)',
+      'nav-tasks': '📋 Tasks 0/2',
+      'nav-actions': '🛠 Actions (1)',
+    })
+    await ui.press({ key: 'nav-tasks' })
+    expect((await navTexts(ui))['nav-tasks']).toBe('▸ 📋 Tasks 0/2')
+    expect((await navTexts(ui))['nav-questions']).toBe('❓ Questions (1)')
+    await ui.unmount()
+  })
+
+  test('a missing tasks file offers the setup until dismissed', async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ ...START, isInteractive: false })
+    const ui = await $.ui.mount(PANE)
+    expect((await navTexts(ui))['nav-tasks']).toBe('📋 Tasks (set up)')
+    await ui.press({ key: 'nav-tasks' })
+    await ui.press({ key: 'tasks-dismiss' })
+    expect(await navTexts(ui)).toEqual({})
+    expect(await ui.find({ type: 'Text', text: /^Nothing pending/ })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a change in a section that is not shown is marked new until opened', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeDefined()
+    expect((await navTexts(ui))['nav-actions']).toBe('🛠 Actions (1) (new)')
+    await ui.press({ key: 'nav-actions' })
+    expect((await navTexts(ui))['nav-actions']).toBe('▸ 🛠 Actions (1)')
+    await ui.unmount()
+  })
+
+  test('the pane is called Agent inbox', async ($, on) => {
+    const { titles } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(titles).toEqual(['Agent inbox'])
+  })
+})
+
+describe('notifications', () => {
+  test('a new item opens its own section', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    expect((await navTexts(ui))['nav-actions']).toBe('🛠 Actions (1)')
+    await ui.unmount()
+  })
+
+  test('each section has its own sound gap', async ($, on) => {
+    const { alerts, clock } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(500)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(alerts).toHaveLength(2)
+    await clock.advance(500)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })
+    expect(alerts).toHaveLength(2)
+  })
+
+  test('one status line covers the three sections', async ($, on) => {
+    const { statuses, fs, clock } = engine(on)
+    await $.session.start(START)
+    expect(statuses.at(-1)).toBe('📋 0/2 tasks · /questions')
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(statuses.at(-1)).toBe('❓ 1 question · 🛠 1 action · 📋 0/2 tasks · /questions')
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(5_000)
+    expect(statuses.at(-1)).toBe('❓ 1 question · 🛠 1 action · 📋 1/2 tasks · /questions')
+  })
+
+  test('the status line is cleared when nothing is pending', async ($, on) => {
+    const { statuses } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+    expect(statuses.at(-1)).toBeUndefined()
   })
 })
