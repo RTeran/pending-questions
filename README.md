@@ -16,6 +16,14 @@ questions get lost. This Claude Code mod keeps every open question in a side pan
   prompt box, so pressing Enter delivers it into the agent's running turn.
 - An answer typed in the chat that starts with `[Q3` closes the question too.
 - `question_close` removes a question that no longer matters. `/questions` opens the pane.
+- A new question plays a sound on macOS. The plugin's `sound` option picks it:
+  - `alert` (the default) plays the macOS alert sound you chose in System Settings > Sound. It
+    ignores each terminal's own bell mute.
+  - `ding` plays a short built-in tone through `afplay`.
+  - `off` plays nothing.
+
+  A sound that fails to play is written to the debug log.
+- When the questions do not fit in the pane, a scrollbar on its right edge shows where you are.
 
 The pane's texts are in English. The agent writes each question, its context and its options in
 the language you use.

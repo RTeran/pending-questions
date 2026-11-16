@@ -13,12 +13,15 @@ export type Question = {
 
 export type View = { kind: 'list' } | { kind: 'question'; n: number }
 
+export type ScrollCache = { key: string; contentRows: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'pending-questions': {
       questions: Shaped<Question[]>
       view: Shaped<View>
       now: string
+      scroll: Shaped<ScrollCache>
     }
   }
 }

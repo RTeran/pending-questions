@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, Register } from 'claude-code'
+import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Option, Question, View } from '../types'
+import type { Option, Question, ScrollCache, View } from '../types'
 
 const PANE = 'pending-questions'
 const TITLE = 'Pending questions'
@@ -18,6 +18,11 @@ const view = atom({ plugin: 'pending-questions', key: 'view' } as const, { kind:
 const LIST: View = { kind: 'list' }
 
 const now = atom({ plugin: 'pending-questions', key: 'now' } as const, '')
+
+const scroll = atom({ plugin: 'pending-questions', key: 'scroll' } as const, { key: '', contentRows: 0 } as ScrollCache, {
+  shape: 'scroll-1',
+})
+let drawnKey = ''
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -80,6 +85,77 @@ export const answeredRef = (text: string) => {
 
 export const optionTextOf = (o: Option) => `${o.key}: ${o.label}`
 
+const lineRows = (line: string, columns: number) => {
+  let rows = 1
+  let used = 0
+  for (const word of line.split(' ')) {
+    const length = [...word].length
+    const needed = used === 0 ? length : used + 1 + length
+    if (needed <= columns) {
+      used = needed
+      continue
+    }
+    const room = used === 0 || length <= columns ? 0 : columns - used - 1
+    const fromHere = room > 0 ? Math.ceil((length - room) / columns) : Infinity
+    const fromNext = (used > 0 ? 1 : 0) + Math.ceil(length / columns) - 1
+    const tail = fromHere <= fromNext ? length - room : length
+    rows += Math.min(fromHere, fromNext)
+    used = tail % columns || columns
+  }
+  return rows
+}
+
+export const rowsOf = (text: string, columns: number) =>
+  text.split('\n').reduce((sum, line) => sum + lineRows(line, Math.max(1, columns)), 0)
+
+const stackRows = (children: readonly number[]) =>
+  children.length === 0 ? 0 : children.reduce((sum, rows) => sum + rows, 0) + children.length - 1
+
+const listHeaderOf = (q: Question, at: Date) =>
+  `Q${q.n} · ${clockOf(q.askedAt)} · ${ageOf(q.askedAt, at)}${q.queuedAt ? ' · ⏳ queued' : ''}`
+
+export const listRows = (list: readonly Question[], at: Date, columns: number) => {
+  const showDays = spansDays(list, at)
+  return stackRows(
+    groupByDay(list, at).map(group =>
+      stackRows([
+        ...(showDays ? [rowsOf(`── ${group.label} ──`, columns)] : []),
+        ...group.items.map(q => rowsOf(listHeaderOf(q, at), columns) + rowsOf(q.question, columns)),
+      ]),
+    ),
+  )
+}
+
+const ANSWER_FIELD_ROWS = 4
+
+const sentLineOf = (queuedAt: string) => `⏳ Sent at ${clockOf(queuedAt)}: it arrives when the lead ends its turn.`
+
+export const detailRows = (q: Question, at: Date, columns: number) =>
+  stackRows([
+    1,
+    rowsOf(`Q${q.n} · asked ${stampOf(q.askedAt)} · ${ageOf(q.askedAt, at)}`, columns) + rowsOf(q.question, columns),
+    ...(q.context !== '' ? [rowsOf(q.context, columns)] : []),
+    ...(q.options.length > 0
+      ? [
+          q.options.reduce(
+            (sum, o) => sum + rowsOf(`○ ${optionTextOf(o)}${o.key === q.recommended ? ' (recommended)' : ''}`, columns),
+            0,
+          ),
+        ]
+      : []),
+    q.queuedAt ? rowsOf(sentLineOf(q.queuedAt), columns) : ANSWER_FIELD_ROWS + 1,
+  ])
+
+export type Thumb = { start: number; size: number }
+
+export const thumbOf = ({ offset, bodyRows, contentRows }: { offset: number; bodyRows: number; contentRows: number }) => {
+  if (bodyRows <= 0 || contentRows <= bodyRows) return undefined
+  const size = Math.max(1, Math.round((bodyRows * bodyRows) / contentRows))
+  const travel = bodyRows - size
+  const ratio = Math.min(1, Math.max(0, offset / (contentRows - bodyRows)))
+  return { start: Math.round(ratio * travel), size } satisfies Thumb
+}
+
 const ANSWER_ORIGINS = new Set(['composer', 'bridge', 'plugin'])
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
@@ -100,6 +176,88 @@ export const optionsOf = (raw: unknown): Option[] =>
 
 const isQuestionList = (value: unknown): value is Question[] =>
   Array.isArray(value) && value.every(q => typeof q?.n === 'number' && typeof q?.question === 'string' && typeof q?.askedAt === 'string')
+
+const SAMPLE_RATE = 22_050
+
+const wavOf = (samples: Float32Array) => {
+  const bytes = new Uint8Array(44 + samples.length * 2)
+  const data = new DataView(bytes.buffer)
+  const text = (at: number, value: string) => [...value].forEach((c, i) => data.setUint8(at + i, c.charCodeAt(0)))
+  text(0, 'RIFF')
+  data.setUint32(4, 36 + samples.length * 2, true)
+  text(8, 'WAVE')
+  text(12, 'fmt ')
+  data.setUint32(16, 16, true)
+  data.setUint16(20, 1, true)
+  data.setUint16(22, 1, true)
+  data.setUint32(24, SAMPLE_RATE, true)
+  data.setUint32(28, SAMPLE_RATE * 2, true)
+  data.setUint16(32, 2, true)
+  data.setUint16(34, 16, true)
+  text(36, 'data')
+  data.setUint32(40, samples.length * 2, true)
+  samples.forEach((v, i) => data.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, v)) * 32_767), true))
+  let binary = ''
+  for (const b of bytes) binary += String.fromCharCode(b)
+  return btoa(binary)
+}
+
+const dingOf = (seconds: number, hz: number) =>
+  Float32Array.from({ length: Math.round(SAMPLE_RATE * seconds) }, (_, i) => {
+    const t = i / SAMPLE_RATE
+    const attack = Math.min(1, t / 0.005)
+    const tone = Math.sin(2 * Math.PI * hz * t) + 0.35 * Math.sin(4 * Math.PI * hz * t)
+    return 0.4 * attack * Math.exp(-t * 14) * tone
+  })
+
+export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav' } as const
+
+const SOUND_GAP_MS = 1_000
+let lastSoundAt = -Infinity
+
+const logDebug = ($: Engine, text: string) => {
+  try {
+    $.ui.log(`pending-questions: ${text}`, { to: 'debug' })
+  } catch {
+    // A sound is a courtesy: losing its log line must not fail the question.
+  }
+}
+
+const logSoundFailure = ($: Engine, error: unknown) => logDebug($, `the new-question sound did not play: ${String(error)}`)
+
+export type Sound = 'alert' | 'ding' | 'off'
+
+const SOUNDS: readonly unknown[] = ['alert', 'ding', 'off']
+
+export const soundOf = (raw: unknown): Sound => {
+  if (raw === false) return 'off'
+  return SOUNDS.includes(raw) ? (raw as Sound) : 'alert'
+}
+
+export const isUnknownSound = (raw: unknown) => raw !== undefined && raw !== false && !SOUNDS.includes(raw)
+
+const ALERT_ARGV = ['/usr/bin/osascript', '-e', 'beep']
+
+async function playAlert($: Engine) {
+  const { exitCode, stderr } = await $.process.run(ALERT_ARGV, { timeoutMs: 5_000 })
+  if (exitCode !== 0) logSoundFailure($, `osascript exit code ${exitCode}: ${stderr.trim()}`)
+}
+
+export async function chime($: Engine, sound: Sound): Promise<{ played: Promise<void> | undefined }> {
+  if (sound === 'off') return { played: undefined }
+  try {
+    const at = await $.clock.now()
+    if (at - lastSoundAt < SOUND_GAP_MS) return { played: undefined }
+    lastSoundAt = at
+  } catch (error) {
+    logSoundFailure($, error)
+    return { played: undefined }
+  }
+  const played = Promise.resolve()
+    .then(() => (sound === 'alert' ? playAlert($) : $.audio.play(ACK_SOUND)))
+    .catch(error => logSoundFailure($, error))
+  return { played }
+}
 
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
 type CloseInput = { n?: unknown; reason?: unknown }
@@ -180,9 +338,17 @@ export async function isTeammateProcess($: Engine) {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const sound = soundOf(options.sound)
+  let isSoundOptionReported = false
+
   on('session.start', async ($, e, next) => {
     if (await isTeammateProcess($)) return next(e)
+
+    if (!isSoundOptionReported && isUnknownSound(options.sound)) {
+      isSoundOptionReported = true
+      logDebug($, `unknown sound option ${JSON.stringify(options.sound)}; playing the alert`)
+    }
 
     const sessionId = await $.session.id()
     storeKey = `open:${sessionId}`
@@ -284,6 +450,7 @@ export const register: Register = on => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
+    await chime($, sound)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return {
@@ -308,6 +475,17 @@ export const register: Register = on => {
     return result
   }).catch(($, e, next) => next(e))
 
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const key = drawnKey
+    const result = await next(e)
+    if (key === '') return result
+    const cached = await read($, scroll)
+    if (cached.key !== key || cached.contentRows !== e.contentRows) {
+      await update($, scroll, () => ({ key, contentRows: e.contentRows }))
+    }
+    return result
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
     const list = await read($, questions)
@@ -316,10 +494,39 @@ export const register: Register = on => {
     const at = stamp ? new Date(stamp) : new Date()
 
     const open = current.kind === 'question' ? list.find(q => q.n === current.n) : undefined
+    const cached = await read($, scroll)
+    const columns = Math.max(1, e.props.bodyColumns - 1)
+
+    const withScrollbar = (key: string, estimate: number, content: RenderNode) => {
+      drawnKey = `${key}:${columns}`
+      const { offset, bodyRows } = e.props.scroll
+      const contentRows = cached.key === drawnKey ? cached.contentRows : estimate
+      const thumb = thumbOf({ offset, bodyRows, contentRows })
+      return (
+        <Box flexDirection="column" position="relative" paddingRight={1}>
+          {content}
+          {thumb && (
+            <Box key="scrollbar" position="absolute" right={0} top={offset} height={bodyRows} flexDirection="column">
+              {Array.from({ length: bodyRows }, (_, row) =>
+                row >= thumb.start && row < thumb.start + thumb.size ? (
+                  <Text key={`scrollbar-${row}`}>█</Text>
+                ) : (
+                  <Text key={`scrollbar-${row}`} dimColor>
+                    │
+                  </Text>
+                ),
+              )}
+            </Box>
+          )}
+        </Box>
+      )
+    }
 
     if (open) {
       const n = open.n
-      return (
+      return withScrollbar(
+        `q:${n}:${open.queuedAt ? 'sent' : 'open'}`,
+        detailRows(open, at, columns),
         <Box flexDirection="column" gap={1}>
           <Button key="back" plain onPress={() => void update($, view, () => LIST)}>
             ← All questions
@@ -348,7 +555,7 @@ export const register: Register = on => {
             </Box>
           )}
           {open.queuedAt ? (
-            <Text color="warning">⏳ Sent at {clockOf(open.queuedAt)}: it arrives when the lead ends its turn.</Text>
+            <Text color="warning">{sentLineOf(open.queuedAt)}</Text>
           ) : (
             <Box flexDirection="column">
               <Input
@@ -385,14 +592,16 @@ export const register: Register = on => {
               </Box>
             </Box>
           )}
-        </Box>
+        </Box>,
       )
     }
 
     if (list.length === 0) return <Text dimColor>No pending questions.</Text>
 
     const showDays = spansDays(list, at)
-    return (
+    return withScrollbar(
+      `list:${showDays ? 'days' : 'today'}:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      listRows(list, at, columns),
       <Box flexDirection="column" gap={1}>
         {groupByDay(list, at).map(group => (
           <Box flexDirection="column" gap={1}>
@@ -413,7 +622,7 @@ export const register: Register = on => {
             ))}
           </Box>
         ))}
-      </Box>
+      </Box>,
     )
   })
 }
