@@ -29,6 +29,7 @@ const NO_TASKS: TasksSource = {
   draft: '',
   isDismissed: false,
   isSetupAsked: false,
+  isUnseen: false,
 }
 const tasks = atom({ plugin: 'pending-questions', key: 'tasks' } as const, NO_TASKS, { shape: 'tasks-1' })
 const TASKS_VIEW: View = { kind: 'tasks' }
@@ -615,58 +616,121 @@ const isSeenFor = (value: unknown, path: string): value is Seen =>
   typeof (value as Seen).text === 'string'
 
 export const tasksInstructionOf = (path: string) =>
-  `Keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
+  `If you are the main session, not a subagent or a teammate, keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
 
-const absoluteOf = (path: string, root: string) => (path.startsWith('/') ? path : `${root.replace(/\/+$/, '')}/${path}`)
+export const resolvePath = (path: string, root: string, home: string) => {
+  const expanded = home !== '' && (path === '~' || path.startsWith('~/')) ? `${home}${path.slice(1)}` : path
+  const absolute = expanded.startsWith('/') ? expanded : `${root}/${expanded}`
+  const parts: string[] = []
+  for (const part of absolute.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
 
 let isLead = false
+let homeDir = ''
 let tasksRoot = ''
 let tasksPath = ''
 let lastStat = ''
+let lastReadError = ''
 let current: Snapshot = { hash: hashOf(''), text: '' }
 let committed: Snapshot | undefined
 let pending = { hash: '', count: 0 }
 let polling: { cancel: () => void } | undefined
 let observing: Promise<void> = Promise.resolve()
 
-async function readTasks($: Engine) {
-  let stat: { size: number; mtimeMs: number; kind: string } | undefined
+function reportReadError($: Engine, error: unknown) {
+  const text = String(error)
+  if (text === lastReadError) return
+  lastReadError = text
+  logDebug($, `the tasks file ${tasksPath} could not be read: ${text}`)
+}
+
+async function markMissing($: Engine) {
+  lastStat = ''
+  lastReadError = ''
+  await update($, tasks, t => ({ ...t, exists: false, isTooLarge: false }))
+}
+
+// A missing, oversized or unreadable file is never taken as an empty one: the baseline stays,
+// so a git checkout or a passing error cannot report tasks as removed and then as added.
+async function readTasks($: Engine): Promise<'fresh' | 'unchanged' | 'unusable'> {
+  let stat: { size: number; mtimeMs: number; kind: string }
   try {
+    if (!(await $.fs.exists(tasksPath))) {
+      await markMissing($)
+      return 'unusable'
+    }
     stat = await $.fs.stat(tasksPath)
-  } catch {
-    stat = undefined
+  } catch (error) {
+    reportReadError($, error)
+    return 'unusable'
   }
-  if (!stat || stat.kind !== 'file') {
-    lastStat = ''
-    current = { hash: hashOf(''), text: '' }
-    await update($, tasks, t => ({ ...t, exists: false, text: '', hash: '', isTooLarge: false }))
-    return
+  if (stat.kind !== 'file') {
+    await markMissing($)
+    return 'unusable'
   }
   const key = `${stat.size}:${stat.mtimeMs}`
-  if (key === lastStat) return
-  const isTooLarge = stat.size > TASKS_MAX_BYTES
-  const raw = isTooLarge ? '' : await $.fs.read(tasksPath)
-  const text = normalize(typeof raw === 'string' ? raw : '')
+  if (key === lastStat) return 'unchanged'
+  if (stat.size > TASKS_MAX_BYTES) {
+    lastStat = key
+    lastReadError = ''
+    await update($, tasks, t => ({ ...t, exists: true, isTooLarge: true }))
+    return 'unusable'
+  }
+  let raw: unknown
+  try {
+    raw = await $.fs.read(tasksPath)
+  } catch (error) {
+    reportReadError($, error)
+    return 'unusable'
+  }
+  if (typeof raw !== 'string') {
+    reportReadError($, 'the read did not return text')
+    return 'unusable'
+  }
+  const text = normalize(raw)
   lastStat = key
+  lastReadError = ''
   current = { hash: hashOf(text), text }
-  await update($, tasks, t => ({ ...t, exists: true, text, hash: current.hash, isTooLarge }))
+  await update($, tasks, t => ({ ...t, exists: true, text, hash: current.hash, isTooLarge: false }))
+  return 'fresh'
 }
 
 async function commit($: Engine, next: Snapshot) {
   committed = next
   pending = { hash: '', count: 0 }
-  await $.store.set(`tasksSeen:${tasksRoot}`, { path: tasksPath, ...next } satisfies Seen)
+  try {
+    await $.store.set(`tasksSeen:${tasksRoot}`, { path: tasksPath, ...next } satisfies Seen)
+  } catch (error) {
+    logDebug($, `the tasks baseline could not be saved: ${String(error)}`)
+  }
+}
+
+async function openTasksView($: Engine) {
+  await update($, tasks, t => ({ ...t, isUnseen: false }))
+  await update($, view, () => TASKS_VIEW)
 }
 
 async function notifyTasks($: Engine, sound: Sound, text: string) {
+  const shown = await read($, view)
+  if (shown.kind === 'question' || shown.kind === 'action') {
+    await update($, tasks, t => ({ ...t, isUnseen: true }))
+    $.ui.toast(text)
+    return
+  }
   await chime($, sound, 'tasks')
-  await update($, view, () => TASKS_VIEW)
+  await openTasksView($)
   openPane($)
   $.ui.toast(text)
 }
 
 async function observeTasks($: Engine, sound: Sound, isPoll: boolean) {
-  await readTasks($)
+  if (tasksPath === '') return
+  if ((await readTasks($)) === 'unusable') return
   if (!committed) return commit($, current)
   if (!isPoll) return
   if (current.hash === committed.hash) {
@@ -683,7 +747,7 @@ async function observeTasks($: Engine, sound: Sound, isPoll: boolean) {
 function observe($: Engine, sound: Sound, isPoll: boolean) {
   observing = observing
     .then(() => observeTasks($, sound, isPoll))
-    .catch(error => logDebug($, `the tasks file could not be read: ${String(error)}`))
+    .catch(error => logDebug($, `the tasks check failed: ${String(error)}`))
   return observing
 }
 
@@ -693,28 +757,41 @@ async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
     $.ui.toast('Write the path of the tasks file first.')
     return
   }
-  const path = absoluteOf(typed, tasksRoot)
-  await $.store.set(`tasksFile:${tasksRoot}`, path)
-  await update($, view, () => TASKS_VIEW)
-  await useTasksPath($, sound, path)
+  try {
+    const path = resolvePath(typed, tasksRoot, homeDir)
+    await $.store.set(`tasksFile:${tasksRoot}`, path)
+    await openTasksView($)
+    await useTasksPath($, sound, path)
+  } catch (error) {
+    logDebug($, `the tasks path could not be used: ${String(error)}`)
+    $.ui.toast('Could not use that path. Try again.')
+  }
 }
 
 async function dismissTasksSetup($: Engine) {
-  await update($, tasks, t => ({ ...t, isDismissed: true }))
-  await update($, view, () => LIST)
+  try {
+    await update($, tasks, t => ({ ...t, isDismissed: true }))
+    await update($, view, () => LIST)
+  } catch (error) {
+    logDebug($, `the tasks setup could not be dismissed: ${String(error)}`)
+    $.ui.toast('Could not close the setup. Try again.')
+  }
 }
 
 async function refreshOnWrite($: Engine, sound: Sound, filePath: unknown) {
   try {
-    if (isLead && typeof filePath === 'string' && absoluteOf(filePath, tasksRoot) === tasksPath) await observe($, sound, false)
-  } catch {
-    // A refresh is a courtesy: it must never change what the Write or Edit answered.
+    if (isLead && tasksPath !== '' && typeof filePath === 'string' && resolvePath(filePath, tasksRoot, homeDir) === tasksPath) {
+      await observe($, sound, false)
+    }
+  } catch (error) {
+    logDebug($, `the tasks file was not refreshed after a write: ${String(error)}`)
   }
 }
 
 async function useTasksPath($: Engine, sound: Sound, path: string) {
   tasksPath = path
   lastStat = ''
+  lastReadError = ''
   committed = undefined
   pending = { hash: '', count: 0 }
   const seen = await $.store.get(`tasksSeen:${tasksRoot}`)
@@ -837,17 +914,22 @@ export const register: Register = (on, options) => {
     await $.command.register({ name: 'questions', description: 'Opens the pending questions pane' })
 
     isLead = true
-    tasksRoot = await $.session.root()
-    const storedPath = await $.store.get(`tasksFile:${tasksRoot}`)
-    const optionPath = typeof options.tasksFile === 'string' ? options.tasksFile.trim() : ''
-    const path = typeof storedPath === 'string' && storedPath !== '' ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
-    await useTasksPath($, sound, absoluteOf(path, tasksRoot))
-    const source = await read($, tasks)
-    if (e.isInteractive && !source.exists && !source.isDismissed && !source.isSetupAsked) {
-      await update($, tasks, t => ({ ...t, isSetupAsked: true }))
-      await update($, view, () => ({ kind: 'tasks-setup' }) as View)
-      await chime($, sound, 'tasks')
-      openPane($)
+    try {
+      homeDir = (await $.env.get('HOME')) ?? ''
+      tasksRoot = await $.session.root()
+      const storedPath = await $.store.get(`tasksFile:${tasksRoot}`)
+      const optionPath = typeof options.tasksFile === 'string' ? options.tasksFile.trim() : ''
+      const path = typeof storedPath === 'string' && storedPath !== '' ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
+      await useTasksPath($, sound, resolvePath(path, tasksRoot, homeDir))
+      const source = await read($, tasks)
+      if (e.isInteractive && !source.exists && !source.isDismissed && !source.isSetupAsked) {
+        await update($, tasks, t => ({ ...t, isSetupAsked: true }))
+        await update($, view, () => ({ kind: 'tasks-setup' }) as View)
+        await chime($, sound, 'tasks')
+        openPane($)
+      }
+    } catch (error) {
+      logDebug($, `the tasks file could not be set up: ${String(error)}`)
     }
     polling?.cancel()
     polling = $.clock.every(TASKS_POLL_MS, () => void observe($, sound, true))
@@ -861,6 +943,10 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     const result = await next(e)
+    if (e.reason !== 'clear') {
+      polling?.cancel()
+      polling = undefined
+    }
     if (e.reason === 'clear' && isLead) {
       try {
         await keysOf($)
@@ -980,7 +1066,10 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (!isLead || tasksPath === '' || e.traits.includes('teammate')) return result
     return { sections: [...result.sections, { id: 'pending-questions:tasks', text: tasksInstructionOf(tasksPath), scope: 'session' as const }] }
-  }).catch(($, e, next) => next(e))
+  }).catch(($, e, next) => {
+    logDebug($, 'the tasks instruction was left out of the system prompt')
+    return next(e)
+  })
 
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
@@ -1245,8 +1334,8 @@ export const register: Register = (on, options) => {
             </Button>
           )}
           {hasTasksEntry && (
-            <Button key="to-tasks" plain onPress={() => void update($, view, () => TASKS_VIEW)}>
-              📋 Tasks →
+            <Button key="to-tasks" plain onPress={() => void openTasksView($)}>
+              📋 Tasks{source.isUnseen ? ' (new)' : ''} →
             </Button>
           )}
         </Box>

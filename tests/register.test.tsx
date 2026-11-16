@@ -56,25 +56,45 @@ const engine = (
   initialFiles: Record<string, string> = { '/repo/TASKS.md': TASKS },
 ) => {
   const submitted: string[] = []
-  const files = new Map(Object.entries(initialFiles).map(([path, text]) => [path, { text, mtimeMs: 1 }]))
+  const files = new Map<string, { text: string; mtimeMs: number; size?: number }>(
+    Object.entries(initialFiles).map(([path, text]) => [path, { text, mtimeMs: 1 }]),
+  )
   let writes = 1
   let isReadFailing = false
+  let isStatFailing = false
+  const reads: string[] = []
   const fs = {
-    write: (path: string, text: string) => void files.set(path, { text, mtimeMs: ++writes }),
+    write: (path: string, text: string, size?: number) => void files.set(path, { text, mtimeMs: ++writes, size }),
     remove: (path: string) => void files.delete(path),
-    failReads: () => {
-      isReadFailing = true
+    reads,
+    failReads: (isFailing = true) => {
+      isReadFailing = isFailing
+    },
+    failStats: (isFailing = true) => {
+      isStatFailing = isFailing
+    },
+    failRoot: () => {
+      isRootFailing = true
     },
   }
-  on('session.root', () => ({ value: '/repo' }))
+  let isRootFailing = false
+  on('session.root', () => {
+    if (isRootFailing) throw new Error('no root')
+    return { value: '/repo' }
+  })
+  mock.env(on, { HOME: '/home/me' })
+  on('fs.exists', (_, e) => ({ value: files.has(e.path) }))
   on('fs.stat', (_, e) => {
     const file = files.get(e.path)
     if (!file) throw new Error(`ENOENT: ${e.path}`)
-    return { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
+    if (isStatFailing) throw new Error(`EACCES: ${e.path}`)
+    return { value: { kind: 'file', size: file.size ?? file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
   })
   on('fs.read', (_, e) => {
+    reads.push(e.path)
     const file = files.get(e.path)
-    if (!file || isReadFailing) throw new Error(`ENOENT: ${e.path}`)
+    if (!file) throw new Error(`ENOENT: ${e.path}`)
+    if (isReadFailing) throw new Error(`EIO: ${e.path}`)
     return { value: file.text }
   })
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude.', scope: 'shared' }] }))
@@ -1115,7 +1135,7 @@ describe('tasks source', () => {
   test('a path stored for the project wins over the option and the default', { options: { tasksFile: 'plan/todo.md' } }, async ($, on) => {
     engine(on, { 'tasksFile:/repo': '/repo/notes/tasks.md' }, 'main\n', false, 'ok', { '/repo/notes/tasks.md': TASKS })
     await $.session.start(START)
-    expect(await taskSection($ as never)).toBe('Keep your task list in /repo/notes/tasks.md, using `- [ ]` / `- [x]` checkboxes.')
+    expect(await taskSection($ as never)).toBe('If you are the main session, not a subagent or a teammate, keep your task list in /repo/notes/tasks.md, using `- [ ]` / `- [x]` checkboxes.')
   })
 
   test('the option is used when the project has no stored path', { options: { tasksFile: 'plan/todo.md' } }, async ($, on) => {
@@ -1425,5 +1445,170 @@ describe('a /clear', () => {
     const ui = await $.ui.mount(PANE)
     expect(await ui.find({ type: 'Button', key: 'q-13' })).toBeDefined()
     await ui.unmount()
+  })
+})
+
+describe('tasks review', () => {
+  test('a file over 4 MiB is not read, says so and does not notify', async ($, on) => {
+    const { fs, clock, alerts, toasts } = engine(on)
+    await $.session.start(START)
+    const before = fs.reads.length
+    fs.write('/repo/TASKS.md', '- [x] one\n', 5 * 1024 * 1024)
+    await clock.advance(15_000)
+    expect(fs.reads).toHaveLength(before)
+    expect(alerts).toEqual([])
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+    expect(await ui.find({ type: 'Text', text: /larger than 4 MiB/ })).toBeDefined()
+    await ui.unmount()
+
+    fs.write('/repo/TASKS.md', TASKS)
+    await clock.advance(15_000)
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+  })
+
+  test('a poll with an unchanged stat reads nothing', async ($, on) => {
+    const { fs, clock } = engine(on)
+    await $.session.start(START)
+    const before = fs.reads.length
+    await clock.advance(20_000)
+    expect(fs.reads).toHaveLength(before)
+  })
+
+  test('a file deleted and brought back unchanged notifies nothing', async ($, on) => {
+    const { fs, clock, toasts, alerts } = engine(on)
+    await $.session.start(START)
+    fs.remove('/repo/TASKS.md')
+    await clock.advance(15_000)
+    fs.write('/repo/TASKS.md', TASKS)
+    await clock.advance(15_000)
+    expect(alerts).toEqual([])
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+  })
+
+  test('a file deleted mid-session shows as missing', async ($, on) => {
+    const { fs, clock } = engine(on)
+    await $.session.start(START)
+    fs.remove('/repo/TASKS.md')
+    await clock.advance(5_000)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+    expect(await ui.find({ type: 'Input', key: 'tasks-path' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a read error keeps the last text, is logged once and notifies nothing', async ($, on) => {
+    const { fs, clock, toasts, logs } = engine(on)
+    await $.session.start(START)
+    fs.failReads()
+    fs.write('/repo/TASKS.md', '- [x] one\n')
+    await clock.advance(20_000)
+    expect(logs.filter(line => /tasks file .* could not be read/.test(line))).toHaveLength(1)
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toBe(TASKS)
+    await ui.unmount()
+  })
+
+  test('a stat error keeps the file as it was', async ($, on) => {
+    const { fs, clock, toasts, logs } = engine(on)
+    await $.session.start(START)
+    fs.failStats()
+    await clock.advance(15_000)
+    fs.failStats(false)
+    await clock.advance(15_000)
+    expect(logs.filter(line => /tasks file .* could not be read/.test(line))).toHaveLength(1)
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+  })
+
+  test('an edit undone within the debounce window notifies nothing', async ($, on) => {
+    const { fs, clock, alerts } = engine(on)
+    await $.session.start(START)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(5_000)
+    fs.write('/repo/TASKS.md', TASKS)
+    await clock.advance(15_000)
+    expect(alerts).toEqual([])
+  })
+
+  test('a Write through a relative or dotted path refreshes, another file does not', async ($, on) => {
+    const { fs } = engine(on)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-tasks' })
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [ ] via relative\n')
+    await $.tool.call({ tool: 'Write', file_path: 'docs/../TASKS.md', content: '' } as never)
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/via relative/)
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [ ] not yet\n')
+    await $.tool.call({ tool: 'Write', file_path: '/repo/OTHER.md', content: '' } as never)
+    expect((await ui.find({ type: 'Markdown' }))?.props.text).toMatch(/via relative/)
+    await ui.unmount()
+  })
+
+  test('a path with ./ in the option resolves under the root', { options: { tasksFile: './plan/../TASKS.md' } }, async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toMatch(/in \/repo\/TASKS\.md,/)
+  })
+
+  test('a leading ~ is the home directory', { options: { tasksFile: '~/notes/tasks.md' } }, async ($, on) => {
+    engine(on, {}, 'main\n', false, 'ok', { '/home/me/notes/tasks.md': TASKS })
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toMatch(/in \/home\/me\/notes\/tasks\.md,/)
+  })
+
+  test('an empty path in the setup card stores nothing', async ($, on) => {
+    const { store, toasts } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.input({ key: 'tasks-path', text: '   ', kind: 'change' })
+    await ui.press({ key: 'tasks-use' })
+    expect(store.has('tasksFile:/repo')).toBe(false)
+    expect(toasts).toContain('Write the path of the tasks file first.')
+    await ui.unmount()
+  })
+
+  test('a duplicate checkbox label counts once', async () => {
+    expect(summarizeChange('- [ ] a\n', '- [ ] a\n- [x] a\n').isNotable).toBe(false)
+  })
+
+  test('a task change while a question is open only toasts', async ($, on) => {
+    const { fs, clock, toasts, opened, alerts } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'q-1' })
+    const before = { opened: opened.length, alerts: alerts.length }
+
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(10_000)
+    expect(toasts).toContain('1 task done')
+    expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeDefined()
+    expect(opened).toHaveLength(before.opened)
+    expect(alerts).toHaveLength(before.alerts)
+
+    await ui.press({ key: 'back' })
+    expect((await ui.find({ type: 'Button', key: 'to-tasks' }))?.text).toMatch(/new/)
+    await ui.press({ key: 'to-tasks' })
+    await ui.press({ key: 'to-questions' })
+    expect((await ui.find({ type: 'Button', key: 'to-tasks' }))?.text).not.toMatch(/new/)
+    await ui.unmount()
+  })
+
+  test('a tasks setup that fails still restores the questions and polls', async ($, on) => {
+    const { fs, clock, logs } = engine(on, { 'open:session-1': [question(7, new Date().toISOString())], 'seq:session-1': 7 })
+    fs.failRoot()
+    await $.session.start(START)
+    await clock.advance(10_000)
+    expect(logs.some(line => /tasks file could not be set up/.test(line))).toBe(true)
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-7' })).toBeDefined()
+    await ui.unmount()
+    expect(String((await $.tool.call({ tool: OPEN, question: 'next' })).result)).toMatch(/^Registered as Q8,/)
   })
 })

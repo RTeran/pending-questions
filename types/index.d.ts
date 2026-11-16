@@ -29,6 +29,7 @@ export type TasksSource = {
   draft: string
   isDismissed: boolean
   isSetupAsked: boolean
+  isUnseen: boolean
 }
 
 export type View =
