@@ -49,7 +49,8 @@ format. Two kinds of file are understood:
 
 - A checklist: Markdown checkboxes (`- [ ]` and `- [x]`) under any headings.
 - A file with no checkboxes where each task is a heading with a `status:` line under it, like the
-  `TASKS.md` that a ClickUp sync writes:
+  `TASKS.md` that a ClickUp sync writes. A heading that starts with an id such as `T-12` is that
+  task even if its title changes:
 
   ```markdown
   ## T-12 Fix the login
@@ -68,7 +69,8 @@ format. Two kinds of file are understood:
   session. The pane keeps watching the path, so the section appears when the file is created.
 - The pane checks the file every 5 seconds and right after the agent writes or edits it.
 - A change notifies you only when it is a checkbox that changed state, a new checkbox, a new
-  heading or a `status:` line that changed (shown as `T-12 status: in_progress → done`), and only
+  heading or a `status:` line that changed (shown as `T-12 status: in_progress → done`, or as
+  `3 status changes` when three or more change at once), and only
   once the file has kept that content for two checks. Any other edit, such as a `branch:` or
   `depends_on:` line, refreshes the pane silently. A missing, unreadable or larger than 4 MiB file
   never counts as a change.

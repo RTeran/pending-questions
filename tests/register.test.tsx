@@ -2047,6 +2047,19 @@ describe('ClickUp-format tasks', () => {
     expect(summarizeChange(third, third.replace(/status: \w+/g, 'status: done')).text).toBe('3 status changes')
   })
 
+  test('a renamed task is the same task', async () => {
+    const renamed = CLICKUP.replace('## T-12 Fix the login', '## T-12 Fix the login page')
+    expect(summarizeChange(CLICKUP, renamed).isNotable).toBe(false)
+    expect(summarizeChange(CLICKUP, renamed.replace('status: in_progress', 'status: done')).text).toBe(
+      'T-12 status: in_progress → done',
+    )
+  })
+
+  test('a heading without a numbered id is named in full', async () => {
+    const before = '## re-run flaky tests\n- status: pending\n'
+    expect(summarizeChange(before, before.replace('pending', 'done')).text).toBe('re-run flaky tests status: pending → done')
+  })
+
   test('without checkboxes the count is of status done items', async () => {
     expect(taskCountsOf(CLICKUP.replace('status: pending', 'status: done'))).toEqual({ done: 1, total: 2 })
     expect(taskCountsOf('# Notes\nnothing here\n')).toEqual({ done: 0, total: 0 })

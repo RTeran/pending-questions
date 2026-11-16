@@ -214,6 +214,11 @@ const CHECKBOX = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/
 const HEADING = /^#{1,6}\s+(.*)$/
 
 const STATUS = /^\s*(?:[-*+]\s+)?status\s*:\s*(.*?)\s*$/i
+const TASK_ID = /^([a-z]+-\d+)(?:\s|$)/i
+
+// A heading that starts with a task id (`T-12 Fix the login`) is that task whatever its title
+// says, so renaming it in ClickUp is not a new task.
+const taskKeyOf = (heading: string) => TASK_ID.exec(heading)?.[1] ?? heading
 
 // A file like the ClickUp sync's TASKS.md has no checkboxes: each task is a heading with a
 // `status:` line under it, so a status is matched to the nearest heading above it.
@@ -231,7 +236,7 @@ const outlineOf = (text: string) => {
     }
     const title = HEADING.exec(line)
     if (title) {
-      heading = title[1]?.trim() ?? ''
+      heading = taskKeyOf(title[1]?.trim() ?? '')
       headings.add(heading)
       continue
     }
@@ -241,10 +246,6 @@ const outlineOf = (text: string) => {
   return { items, headings, statuses }
 }
 
-const taskNameOf = (heading: string) => {
-  const [first, ...rest] = heading.split(/\s+/)
-  return rest.length > 0 && first && /^[a-z]+-\S+$/i.test(first) ? first : heading
-}
 
 export type TasksChange = {
   done: number
@@ -271,7 +272,7 @@ export const summarizeChange = (prev: string, next: string): TasksChange => {
   const sections = [...after.headings].filter(heading => !before.headings.has(heading)).length
   const statusChanges = [...after.statuses].flatMap(([heading, status]) => {
     const was = before.statuses.get(heading)
-    return was === undefined || was === status ? [] : [`${taskNameOf(heading)} status: ${was} → ${status}`]
+    return was === undefined || was === status ? [] : [`${heading} status: ${was} → ${status}`]
   })
   const counts = ([
     [done, 'done'],
