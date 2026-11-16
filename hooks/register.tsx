@@ -4,10 +4,10 @@ import type { EngineInterface as Engine, Register } from 'claude-code'
 import type { Option, Question, View } from '../types'
 
 const PANE = 'pending-questions'
-const TITLE = 'Preguntas pendientes'
+const TITLE = 'Pending questions'
 const OPEN_TOOL = 'mcp__pending-questions__question_open'
 const CLOSE_TOOL = 'mcp__pending-questions__question_close'
-const LOCALE = 'es-ES'
+const LOCALE = 'en-US'
 
 const questions = atom({ plugin: 'pending-questions', key: 'questions' } as const, [] as Question[], {
   shape: 'questions-1',
@@ -30,15 +30,15 @@ export const clockOf = (iso: string) => {
 
 export const stampOf = (iso: string) => {
   const t = new Date(iso)
-  return `${pad(t.getDate())}/${pad(t.getMonth() + 1)}/${t.getFullYear()} ${clockOf(iso)}`
+  return `${dayOf(t)} ${clockOf(iso)}`
 }
 
 export const ageOf = (iso: string, at: Date) => {
   const minutes = Math.floor((at.getTime() - new Date(iso).getTime()) / 60_000)
-  if (minutes < 1) return 'ahora'
-  if (minutes < 60) return `hace ${minutes} min`
-  if (minutes < 24 * 60) return `hace ${Math.floor(minutes / 60)} h`
-  return `hace ${Math.floor(minutes / (24 * 60))} d`
+  if (minutes < 1) return 'now'
+  if (minutes < 60) return `${minutes} min ago`
+  if (minutes < 24 * 60) return `${Math.floor(minutes / 60)} h ago`
+  return `${Math.floor(minutes / (24 * 60))} d ago`
 }
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
@@ -47,8 +47,8 @@ export const dayLabelOf = (iso: string, at: Date) => {
   const t = new Date(iso)
   const midnight = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime()
   const days = Math.round((midnight(at) - midnight(t)) / 86_400_000)
-  if (days === 0) return 'Hoy'
-  if (days === 1) return 'Ayer'
+  if (days === 0) return 'Today'
+  if (days === 1) return 'Yesterday'
   try {
     if (days > 1 && days < 7) return capitalize(new Intl.DateTimeFormat(LOCALE, { weekday: 'long' }).format(t))
     const year = t.getFullYear() === at.getFullYear() ? {} : { year: 'numeric' as const }
@@ -71,7 +71,7 @@ export const groupByDay = (list: readonly Question[], at: Date) => {
 
 export const spansDays = (list: readonly Question[], at: Date) => list.some(q => dayOf(new Date(q.askedAt)) !== dayOf(at))
 
-export const answerTextOf = (q: Question, answer: string) => `[Q${q.n} · preguntada ${stampOf(q.askedAt)}] ${answer.trim()}`
+export const answerTextOf = (q: Question, answer: string) => `[Q${q.n} · asked ${stampOf(q.askedAt)}] ${answer.trim()}`
 
 export const answeredRef = (text: string) => {
   const match = /^\s*\[Q(\d+)\b/.exec(text)
@@ -80,7 +80,7 @@ export const answeredRef = (text: string) => {
 
 export const optionTextOf = (o: Option) => `${o.key}: ${o.label}`
 
-const ANSWER_ORIGINS =new Set(['composer', 'bridge', 'plugin'])
+const ANSWER_ORIGINS = new Set(['composer', 'bridge', 'plugin'])
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
@@ -110,7 +110,7 @@ let seqKey = 'seq'
 async function save($: Engine) {
   const list = await read($, questions)
   await $.store.set(storeKey, list)
-  $.ui.status(list.length === 0 ? undefined : `❓ ${list.length} ${list.length === 1 ? 'pregunta pendiente' : 'preguntas pendientes'} · /questions`)
+  $.ui.status(list.length === 0 ? undefined : `❓ ${list.length} ${list.length === 1 ? 'pending question' : 'pending questions'} · /questions`)
 }
 
 async function resolveQuestion($: Engine, n: number) {
@@ -119,7 +119,7 @@ async function resolveQuestion($: Engine, n: number) {
   await update($, questions, all => all.filter(q => q.n !== n))
   await update($, view, current => (current.kind === 'question' && current.n === n ? LIST : current))
   await save($)
-  $.ui.toast(`Q${n} respondida.`)
+  $.ui.toast(`Q${n} answered.`)
 }
 
 function setDraft($: Engine, n: number, draft: string) {
@@ -131,7 +131,7 @@ async function send($: Engine, n: number, raw: string) {
   const q = (await read($, questions)).find(one => one.n === n)
   if (!q || q.queuedAt) return
   if (answer === '') {
-    $.ui.toast('Escribe una respuesta o elige una opción antes de enviar.')
+    $.ui.toast('Write an answer or pick an option before sending.')
     return
   }
   await update($, questions, all =>
@@ -145,7 +145,7 @@ async function send($: Engine, n: number, raw: string) {
     .catch(async () => {
       await update($, questions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
       await save($)
-      $.ui.toast(`No se pudo enviar la respuesta a Q${n}. Sigue pendiente.`)
+      $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
     })
 }
 
@@ -156,7 +156,7 @@ async function sendThroughChat($: Engine, n: number, raw: string) {
   const text = answerTextOf(q, raw)
   await $.prompt.fill(typed.trim() === '' ? { text, mode: 'replace' } : { text: `\n\n${text}`, mode: 'append' })
   await update($, view, () => LIST)
-  $.ui.toast(`Respuesta a Q${n} en el prompt: pulsa Enter para enviarla.`)
+  $.ui.toast(`The answer to Q${n} is in the prompt: press Enter to send it.`)
 }
 
 // A teammate in a pane of its own is a separate `claude --agent-id …` process, so the hooks
@@ -195,7 +195,7 @@ export const register: Register = on => {
         'Use it only for secondary ones: a question you need answered, or a decision that is the human\'s to make, that you can keep working without, because the answer refines the result but blocks no step you are about to take. Register it, then keep working on whatever does not depend on the answer.',
         'A question or decision you cannot go on without, or whose answer would change what you are about to do, is not secondary: ask it with AskUserQuestion, which stops the session until the human answers, and do not register it here as well.',
         'The pane keeps the question, with the date and time it was asked, until the human answers.',
-        'The answer arrives as a user message starting with "[Q<n> · preguntada <date>]"; it may arrive while you are busy with something else.',
+        'The answer arrives as a user message starting with "[Q<n> · asked <date>]"; it may arrive while you are busy with something else.',
         'Mention the returned Q<n> when you refer to the question in your replies.',
         'Write question, context and option labels in the language the human uses.',
         'Only the main session or the team lead calls this. A subagent or teammate never does: it returns the question to the agent that started it or sends it to the lead, and that session registers it.',
@@ -236,7 +236,7 @@ export const register: Register = on => {
       isDeferred: false,
     })
 
-    await $.command.register({ name: 'questions', description: 'Abre el panel de preguntas pendientes' })
+    await $.command.register({ name: 'questions', description: 'Opens the pending questions pane' })
 
     if ((await read($, questions)).length === 0) {
       const stored = await $.store.get(storeKey)
@@ -255,7 +255,7 @@ export const register: Register = on => {
     await update($, view, () => LIST)
     await $.ui.open({ id: PANE, title: TITLE })
     const count = (await read($, questions)).length
-    return { text: count === 0 ? 'No hay preguntas pendientes.' : `Panel abierto: ${count} pendientes.` }
+    return { text: count === 0 ? 'No pending questions.' : `Pane opened: ${count} pending.` }
   })
 
   on('tool.call', { tool: OPEN_TOOL }, async ($, e) => {
@@ -322,11 +322,11 @@ export const register: Register = on => {
       return (
         <Box flexDirection="column" gap={1}>
           <Button key="back" plain onPress={() => void update($, view, () => LIST)}>
-            ← Todas las preguntas
+            ← All questions
           </Button>
           <Box flexDirection="column">
             <Text bold>
-              Q{n} · preguntada {stampOf(open.askedAt)} <Text dimColor>· {ageOf(open.askedAt, at)}</Text>
+              Q{n} · asked {stampOf(open.askedAt)} <Text dimColor>· {ageOf(open.askedAt, at)}</Text>
             </Text>
             <Text>{open.question}</Text>
           </Box>
@@ -341,23 +341,23 @@ export const register: Register = on => {
                       {isSelected ? '● ' : '○ '}
                       {optionTextOf(o)}
                     </Text>
-                    {o.key === open.recommended ? <Text color="success"> (recomendada)</Text> : ''}
+                    {o.key === open.recommended ? <Text color="success"> (recommended)</Text> : ''}
                   </Button>
                 )
               })}
             </Box>
           )}
           {open.queuedAt ? (
-            <Text color="warning">⏳ Enviada a las {clockOf(open.queuedAt)}: llegará cuando el lead termine su turno.</Text>
+            <Text color="warning">⏳ Sent at {clockOf(open.queuedAt)}: it arrives when the lead ends its turn.</Text>
           ) : (
             <Box flexDirection="column">
               <Input
                 key={`answer-${n}`}
-                label="Respuesta"
-                placeholder="Elige una opción o escribe tu respuesta"
+                label="Answer"
+                placeholder="Pick an option or write your answer"
                 rows={4}
                 value={open.draft ?? ''}
-                submitLabel="enviar"
+                submitLabel="send"
                 autoFocus
                 onInput={value => void setDraft($, n, value)}
                 onSubmit={value => void send($, n, value)}
@@ -371,7 +371,7 @@ export const register: Register = on => {
                     await send($, n, q?.draft ?? '')
                   }}
                 >
-                  Enviar
+                  Send
                 </Button>
                 <Button
                   key="send-through-chat"
@@ -380,7 +380,7 @@ export const register: Register = on => {
                     await sendThroughChat($, n, q?.draft ?? '')
                   }}
                 >
-                  Enviar ya (al chat)
+                  Send now (to chat)
                 </Button>
               </Box>
             </Box>
@@ -389,7 +389,7 @@ export const register: Register = on => {
       )
     }
 
-    if (list.length === 0) return <Text dimColor>No hay preguntas pendientes.</Text>
+    if (list.length === 0) return <Text dimColor>No pending questions.</Text>
 
     const showDays = spansDays(list, at)
     return (
@@ -403,7 +403,7 @@ export const register: Register = on => {
                   Q{q.n} · {clockOf(q.askedAt)}{' '}
                   <Text dimColor>
                     · {ageOf(q.askedAt, at)}
-                    {q.queuedAt ? ' · ⏳ en cola' : ''}
+                    {q.queuedAt ? ' · ⏳ queued' : ''}
                   </Text>
                 </Text>
                 <Button key={`q-${q.n}`} plain onPress={() => void update($, view, () => ({ kind: 'question', n: q.n }) as View)}>
