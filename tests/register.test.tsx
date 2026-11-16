@@ -143,8 +143,8 @@ test('/questions opens the pane', async ($, on) => {
     command: 'questions',
     args: '',
     origin: { kind: 'composer' },
-    presentation: { isFullscreen: false },
-  } as never)
+    presentation: { isFullscreen: false, columns: 120 },
+  })
   expect(ran.text).toBe('No pending questions.')
 })
 
@@ -260,7 +260,7 @@ test('a teammate in a pane of its own gets none of the tools', async ($, on) => 
   expect(tools).toEqual([])
 })
 
-test('the main session and the lead get both tools', async ($, on) => {
+test('the main session and the lead get the question and action tools', async ($, on) => {
   const { tools } = engine(on)
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(tools).toEqual(['question_open', 'question_close', 'action_open', 'action_close'])
