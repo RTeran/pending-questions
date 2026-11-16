@@ -11,7 +11,39 @@ export type Question = {
   queuedAt?: string
 }
 
-export type View = { kind: 'list' } | { kind: 'question'; n: number }
+export type Action = {
+  n: number
+  action: string
+  context: string
+  url?: string
+  askedAt: string
+  queuedAt?: string
+}
+
+export type TasksSource = {
+  path: string
+  exists: boolean
+  text: string
+  hash: string
+  isTooLarge: boolean
+  draft: string
+  isDismissed: boolean
+  isSetupAsked: boolean
+}
+
+export type Section = 'questions' | 'actions' | 'tasks'
+
+export type Unseen = Record<Section, boolean>
+
+export type ChainState = { id: string; seen: string; endReason: string }
+
+export type View =
+  | { kind: 'list' }
+  | { kind: 'question'; n: number }
+  | { kind: 'actions' }
+  | { kind: 'action'; n: number }
+  | { kind: 'tasks' }
+  | { kind: 'tasks-setup' }
 
 export type ScrollCache = { key: string; contentRows: number }
 
@@ -19,6 +51,10 @@ declare module 'claude-code' {
   interface PluginState {
     'pending-questions': {
       questions: Shaped<Question[]>
+      actions: Shaped<Action[]>
+      tasks: Shaped<TasksSource>
+      chain: Shaped<ChainState>
+      unseen: Shaped<Unseen>
       view: Shaped<View>
       now: string
       scroll: Shaped<ScrollCache>
