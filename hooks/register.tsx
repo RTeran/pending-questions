@@ -510,9 +510,21 @@ async function resolveAction($: Engine, n: number) {
 }
 
 async function markDone($: Engine, n: number) {
+  let isSent = false
   try {
-    await markDoneOrThrow($, n)
+    const a = (await read($, actions)).find(one => one.n === n)
+    if (!a || a.queuedAt) return
+    await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: new Date().toISOString() } : one)))
+    await update($, view, () => ACTIONS)
+    await save($)
+    await $.prompt.submit({ text: doneTextOf(n), asUser: true })
+    isSent = true
+    await resolveAction($, n)
   } catch (error) {
+    if (isSent) {
+      logDebug($, `A${n} was marked done but the pane did not catch up: ${String(error)}`)
+      return
+    }
     logDebug($, `A${n} could not be marked done: ${String(error)}`)
     await unqueueAction($, n)
     $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
@@ -525,27 +537,6 @@ async function unqueueAction($: Engine, n: number) {
     await save($)
   } catch (error) {
     logDebug($, `A${n} could not be put back as pending: ${String(error)}`)
-  }
-}
-
-async function markDoneOrThrow($: Engine, n: number) {
-  const a = (await read($, actions)).find(one => one.n === n)
-  if (!a || a.queuedAt) return
-  await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: new Date().toISOString() } : one)))
-  await update($, view, () => ACTIONS)
-  await save($)
-  try {
-    await $.prompt.submit({ text: doneTextOf(n), asUser: true })
-  } catch (error) {
-    logDebug($, `A${n} could not be marked done: ${String(error)}`)
-    await unqueueAction($, n)
-    $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
-    return
-  }
-  try {
-    await resolveAction($, n)
-  } catch (error) {
-    logDebug($, `A${n} was marked done but the pane did not catch up: ${String(error)}`)
   }
 }
 
@@ -566,9 +557,28 @@ function setDraft($: Engine, n: number, draft: string) {
 }
 
 async function send($: Engine, n: number, raw: string) {
+  let isSent = false
   try {
-    await sendOrThrow($, n, raw)
+    const answer = raw.trim()
+    const q = (await read($, questions)).find(one => one.n === n)
+    if (!q || q.queuedAt) return
+    if (answer === '') {
+      $.ui.toast('Write an answer or pick an option before sending.')
+      return
+    }
+    await update($, questions, all =>
+      all.map(one => (one.n === n ? { ...one, draft: answer, queuedAt: new Date().toISOString() } : one)),
+    )
+    await update($, view, () => LIST)
+    await save($)
+    await $.prompt.submit({ text: answerTextOf(q, answer), asUser: true })
+    isSent = true
+    await resolveQuestion($, n)
   } catch (error) {
+    if (isSent) {
+      logDebug($, `the answer to Q${n} was sent but the pane did not catch up: ${String(error)}`)
+      return
+    }
     logDebug($, `the answer to Q${n} could not be sent: ${String(error)}`)
     await unqueueQuestion($, n)
     $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
@@ -581,34 +591,6 @@ async function unqueueQuestion($: Engine, n: number) {
     await save($)
   } catch (error) {
     logDebug($, `Q${n} could not be put back as pending: ${String(error)}`)
-  }
-}
-
-async function sendOrThrow($: Engine, n: number, raw: string) {
-  const answer = raw.trim()
-  const q = (await read($, questions)).find(one => one.n === n)
-  if (!q || q.queuedAt) return
-  if (answer === '') {
-    $.ui.toast('Write an answer or pick an option before sending.')
-    return
-  }
-  await update($, questions, all =>
-    all.map(one => (one.n === n ? { ...one, draft: answer, queuedAt: new Date().toISOString() } : one)),
-  )
-  await update($, view, () => LIST)
-  await save($)
-  try {
-    await $.prompt.submit({ text: answerTextOf(q, answer), asUser: true })
-  } catch (error) {
-    logDebug($, `the answer to Q${n} could not be sent: ${String(error)}`)
-    await unqueueQuestion($, n)
-    $.ui.toast(`Could not send the answer to Q${n}. It is still pending.`)
-    return
-  }
-  try {
-    await resolveQuestion($, n)
-  } catch (error) {
-    logDebug($, `the answer to Q${n} was sent but the pane did not catch up: ${String(error)}`)
   }
 }
 
@@ -1113,7 +1095,7 @@ export const register: Register = (on, options) => {
 
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
-    if (e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
+    if (!isLead || e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
     try {
       await keysOf($)
       const n = answeredRef(e.text)

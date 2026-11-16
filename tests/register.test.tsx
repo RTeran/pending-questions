@@ -127,7 +127,11 @@ const engine = (
     return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const store = new Map(Object.entries(stored))
-  on('store.get', (_, e) => ({ value: store.get(e.key) }))
+  const storeReads: string[] = []
+  on('store.get', (_, e) => {
+    storeReads.push(e.key)
+    return { value: store.get(e.key) }
+  })
   let isStoreFailing = false
   let isStoreFailingAfterSubmit = false
   on('store.set', (_, e) => {
@@ -198,7 +202,7 @@ const engine = (
       return release
     },
   }
-  return { submitted, pluginSubmits, clock, tools, commands, plays, alerts, logs, opened, toasts, fs, store, control }
+  return { storeReads, submitted, pluginSubmits, clock, tools, commands, plays, alerts, logs, opened, toasts, fs, store, control }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -367,6 +371,13 @@ test('a teammate in a pane of its own gets none of the tools', async ($, on) => 
   const { tools } = engine(on, {}, 'teammate\n')
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(tools).toEqual([])
+})
+
+test('a reply in a teammate process reads no store key', async ($, on) => {
+  const { storeReads } = engine(on, {}, 'teammate\n')
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  await $.prompt.submit({ text: '[Q1 · asked 2026-11-11 10:42] ok', wait: false, origin: { kind: 'composer' } })
+  expect(storeReads).toEqual([])
 })
 
 test('the main session and the lead get the question and action tools', async ($, on) => {
