@@ -20,6 +20,8 @@ import type { Question } from '../types'
 
 const OPEN = 'mcp__pending-questions__question_open'
 const CLOSE = 'mcp__pending-questions__question_close'
+const ACTION_OPEN = 'mcp__pending-questions__action_open'
+const ACTION_CLOSE = 'mcp__pending-questions__action_close'
 
 const PANE = {
   plugin: 'pending-questions',
@@ -88,7 +90,11 @@ const engine = (
     tools.push(e.name)
     return { value: { tool: e.name } }
   })
-  on('ui.open', () => ({ value: { isPlaced: true } }))
+  const opened: string[] = []
+  on('ui.open', (_, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
   on('ui.scroll', () => ({}))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
@@ -96,7 +102,7 @@ const engine = (
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { submitted, clock, tools, commands, plays, alerts, logs }
+  return { submitted, clock, tools, commands, plays, alerts, logs, opened }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -257,7 +263,7 @@ test('a teammate in a pane of its own gets none of the tools', async ($, on) => 
 test('the main session and the lead get both tools', async ($, on) => {
   const { tools } = engine(on)
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-  expect(tools).toEqual(['question_open', 'question_close'])
+  expect(tools).toEqual(['question_open', 'question_close', 'action_open', 'action_close'])
 })
 
 test('a picked option stays marked until the answer changes or another is picked', async ($, on) => {
@@ -673,4 +679,175 @@ describe('scrollbar cache', () => {
     expect(await thumbRows(ui)).toEqual([0, 1, 2])
     await ui.unmount()
   })
+})
+
+describe('actions', () => {
+  test('an action is registered with its own numbering', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    const opened = await $.tool.call({ tool: ACTION_OPEN, action: 'Merge PR #8', url: 'https://github.com/x/y/pull/8' })
+    expect(String(opened.result)).toMatch(/^Registered as A1, asked /)
+  })
+
+  test('an action is reachable from the pane and done from its detail', async ($, on) => {
+    const { submitted, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'Merge PR #8', context: 'CI is green.', url: 'https://github.com/x/y/pull/8' })
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
+    await ui.press({ key: 'to-actions' })
+    expect((await ui.find({ type: 'Button', key: 'a-1' }))?.text).toBe('Merge PR #8')
+
+    await ui.press({ key: 'a-1' })
+    expect((await ui.find({ type: 'Text', text: /CI is green/ }))?.text).toBe('CI is green.')
+    expect(await ui.find({ type: 'Text', text: /pull\/8/ })).toBeDefined()
+
+    await ui.press({ key: 'action-done' })
+    await clock.settle()
+    expect(submitted).toEqual(['[A1 · done]'])
+    expect((await ui.find({ type: 'Text', text: /No pending actions/ }))?.text).toBe('No pending actions.')
+    await ui.unmount()
+  })
+
+  test('a done typed in the chat closes the action and leaves the question with the same number', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })
+
+    await $.prompt.submit({ text: '[A1 · done]', wait: false, origin: { kind: 'composer' } })
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'a-2' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('an answer to a question leaves the action with the same number', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    await $.prompt.submit({ text: '[Q1 · asked 2026-11-11 10:42] ok', wait: false, origin: { kind: 'composer' } })
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('a message from a peer does not close an action', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    await $.prompt.submit({ text: '[A1 · done]', wait: false, origin: { kind: 'peer' } as never })
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Button', key: 'a-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('action numbers are never reused after an action is closed', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'one' })
+    const closed = await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect(String(closed.result)).toBe('A1 removed from the pane.')
+    const missing = await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect(missing.deny).toBe('There is no pending A1.')
+
+    const next = await $.tool.call({ tool: ACTION_OPEN, action: 'two' })
+    expect(String(next.result)).toMatch(/^Registered as A2,/)
+  })
+
+  test('an empty action is denied', async ($, on) => {
+    const { alerts } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const denied = await $.tool.call({ tool: ACTION_OPEN, action: '  ' })
+    expect(denied.deny).toBe('action is required.')
+    expect(alerts).toEqual([])
+  })
+
+  test('a subagent cannot register an action', async ($, on) => {
+    const { alerts } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const denied = await $.tool.call({ tool: ACTION_OPEN, action: 'mine', agentId: 'impl-1' })
+    expect(denied.deny).toMatch(/never call this/)
+    expect(alerts).toEqual([])
+  })
+
+  test('a new action plays the alert and opens the pane', async ($, on) => {
+    const { alerts, opened } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(alerts).toEqual([ALERT])
+    expect(opened).toEqual(['pending-questions'])
+  })
+
+  test('a question and an action less than a second apart play once', async ($, on) => {
+    const { alerts, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(500)
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    expect(alerts).toHaveLength(1)
+  })
+
+  test('stored actions are restored without a sound and without their queued mark', async ($, on) => {
+    const asked = new Date(2026, 10, 10, 18).toISOString()
+    const { alerts, plays } = engine(on, {
+      'actions:session-1': [{ n: 3, action: 'merge it', context: '', askedAt: asked, queuedAt: asked }],
+      'aseq:session-1': 3,
+    })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    expect(await ui.find({ type: 'Text', text: /queued/ })).toBeUndefined()
+    await ui.press({ key: 'a-3' })
+    expect(await ui.find({ type: 'Button', key: 'action-done' })).toBeDefined()
+    expect([...alerts, ...plays]).toEqual([])
+    await ui.unmount()
+
+    const next = await $.tool.call({ tool: ACTION_OPEN, action: 'another' })
+    expect(String(next.result)).toMatch(/^Registered as A4,/)
+  })
+
+  test('closing an open action returns the pane to the actions list', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    const ui = await $.ui.mount(PANE)
+    await ui.press({ key: 'to-actions' })
+    await ui.press({ key: 'a-1' })
+    await $.tool.call({ tool: ACTION_CLOSE, n: 1 })
+    expect((await ui.find({ type: 'Text', text: /No pending actions/ }))?.text).toBe('No pending actions.')
+    await ui.press({ key: 'to-questions' })
+    expect(await ui.find({ type: 'Text', text: /No pending questions/ })).toBeDefined()
+    await ui.unmount()
+  })
+})
+
+test('a view stored by the previous version is read as the list', async ($, on) => {
+  engine(on, { 'open:session-1': [question(1, new Date().toISOString())], 'seq:session-1': 1 })
+  on('state.get', (_, e, next) =>
+    e.key === 'view' ? { value: { value: { shape: 'view-1', value: { kind: 'question', n: 1 } }, version: 1 } } : next(e),
+  )
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+
+  const ui = await $.ui.mount(PANE)
+  expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+  expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeUndefined()
+  await ui.unmount()
 })

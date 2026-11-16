@@ -1,21 +1,28 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Option, Question, ScrollCache, View } from '../types'
+import type { Action, Option, Question, ScrollCache, View } from '../types'
 
 const PANE = 'pending-questions'
 const TITLE = 'Pending questions'
 const OPEN_TOOL = 'mcp__pending-questions__question_open'
 const CLOSE_TOOL = 'mcp__pending-questions__question_close'
+const ACTION_OPEN_TOOL = 'mcp__pending-questions__action_open'
+const ACTION_CLOSE_TOOL = 'mcp__pending-questions__action_close'
 const LOCALE = 'en-US'
 
 const questions = atom({ plugin: 'pending-questions', key: 'questions' } as const, [] as Question[], {
   shape: 'questions-1',
 })
 const view = atom({ plugin: 'pending-questions', key: 'view' } as const, { kind: 'list' } as View, {
-  shape: 'view-1',
+  shape: 'view-2',
 })
 const LIST: View = { kind: 'list' }
+const ACTIONS: View = { kind: 'actions' }
+
+const actions = atom({ plugin: 'pending-questions', key: 'actions' } as const, [] as Action[], {
+  shape: 'actions-1',
+})
 
 const now = atom({ plugin: 'pending-questions', key: 'now' } as const, '')
 
@@ -83,6 +90,13 @@ export const answeredRef = (text: string) => {
   return match ? Number(match[1]) : undefined
 }
 
+export const doneTextOf = (n: number) => `[A${n} · done]`
+
+export const doneRef = (text: string) => {
+  const match = /^\s*\[A(\d+)\b/.exec(text)
+  return match ? Number(match[1]) : undefined
+}
+
 export const optionTextOf = (o: Option) => `${o.key}: ${o.label}`
 
 const lineRows = (line: string, columns: number) => {
@@ -146,6 +160,23 @@ export const detailRows = (q: Question, at: Date, columns: number) =>
     q.queuedAt ? rowsOf(sentLineOf(q.queuedAt), columns) : ANSWER_FIELD_ROWS + 1,
   ])
 
+const actionHeaderOf = (a: Action, at: Date) =>
+  `A${a.n} · ${clockOf(a.askedAt)} · ${ageOf(a.askedAt, at)}${a.queuedAt ? ' · ⏳ queued' : ''}`
+
+const doneLineOf = (queuedAt: string) => `⏳ Marked done at ${clockOf(queuedAt)}: it arrives when the lead ends its turn.`
+
+export const actionListRows = (list: readonly Action[], at: Date, columns: number) =>
+  stackRows([1, ...(list.length === 0 ? [1] : list.map(a => rowsOf(actionHeaderOf(a, at), columns) + rowsOf(a.action, columns)))])
+
+export const actionDetailRows = (a: Action, at: Date, columns: number) =>
+  stackRows([
+    1,
+    rowsOf(`A${a.n} · asked ${stampOf(a.askedAt)} · ${ageOf(a.askedAt, at)}`, columns) + rowsOf(a.action, columns),
+    ...(a.context !== '' ? [rowsOf(a.context, columns)] : []),
+    ...(a.url ? [rowsOf(a.url, columns)] : []),
+    a.queuedAt ? rowsOf(doneLineOf(a.queuedAt), columns) : 1,
+  ])
+
 export type Thumb = { start: number; size: number }
 
 export const thumbOf = ({ offset, bodyRows, contentRows }: { offset: number; bodyRows: number; contentRows: number }) => {
@@ -176,6 +207,9 @@ export const optionsOf = (raw: unknown): Option[] =>
 
 const isQuestionList = (value: unknown): value is Question[] =>
   Array.isArray(value) && value.every(q => typeof q?.n === 'number' && typeof q?.question === 'string' && typeof q?.askedAt === 'string')
+
+const isActionList = (value: unknown): value is Action[] =>
+  Array.isArray(value) && value.every(a => typeof a?.n === 'number' && typeof a?.action === 'string' && typeof a?.askedAt === 'string')
 
 const SAMPLE_RATE = 22_050
 
@@ -261,14 +295,50 @@ export async function chime($: Engine, sound: Sound): Promise<{ played: Promise<
 
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
 type CloseInput = { n?: unknown; reason?: unknown }
+type ActionOpenInput = { action?: unknown; context?: unknown; url?: unknown }
 
 let storeKey = 'open'
 let seqKey = 'seq'
+let actionsKey = 'actions'
+let actionSeqKey = 'aseq'
+
+const countOf = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
 
 async function save($: Engine) {
   const list = await read($, questions)
+  const todo = await read($, actions)
   await $.store.set(storeKey, list)
-  $.ui.status(list.length === 0 ? undefined : `❓ ${list.length} ${list.length === 1 ? 'pending question' : 'pending questions'} · /questions`)
+  await $.store.set(actionsKey, todo)
+  const parts = [
+    ...(list.length > 0 ? [`❓ ${countOf(list.length, 'pending question', 'pending questions')}`] : []),
+    ...(todo.length > 0 ? [`🛠 ${countOf(todo.length, 'pending action', 'pending actions')}`] : []),
+  ]
+  $.ui.status(parts.length === 0 ? undefined : `${parts.join(' · ')} · /questions`)
+}
+
+async function resolveAction($: Engine, n: number) {
+  const list = await read($, actions)
+  if (!list.some(a => a.n === n)) return
+  await update($, actions, all => all.filter(a => a.n !== n))
+  await update($, view, current => (current.kind === 'action' && current.n === n ? ACTIONS : current))
+  await save($)
+  $.ui.toast(`A${n} done.`)
+}
+
+async function markDone($: Engine, n: number) {
+  const a = (await read($, actions)).find(one => one.n === n)
+  if (!a || a.queuedAt) return
+  await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: new Date().toISOString() } : one)))
+  await update($, view, () => ACTIONS)
+  await save($)
+  void $.prompt
+    .submit({ text: doneTextOf(n), asUser: true })
+    .then(() => resolveAction($, n))
+    .catch(async () => {
+      await update($, actions, all => all.map(one => (one.n === n ? { ...one, queuedAt: undefined } : one)))
+      await save($)
+      $.ui.toast(`Could not mark A${n} as done. It is still pending.`)
+    })
 }
 
 async function resolveQuestion($: Engine, n: number) {
@@ -353,6 +423,8 @@ export const register: Register = (on, options) => {
     const sessionId = await $.session.id()
     storeKey = `open:${sessionId}`
     seqKey = `seq:${sessionId}`
+    actionsKey = `actions:${sessionId}`
+    actionSeqKey = `aseq:${sessionId}`
 
     await $.tool.register({
       name: 'question_open',
@@ -402,12 +474,56 @@ export const register: Register = (on, options) => {
       isDeferred: false,
     })
 
+    await $.tool.register({
+      name: 'action_open',
+      description: [
+        'Register an action for the human in the "pending questions" side pane: something only the human can do outside the chat, such as merging a pull request, testing something by hand or providing a credential.',
+        'Register it, then keep working on whatever does not depend on it.',
+        'The pane keeps the action, with the date and time it was registered, until the human marks it done.',
+        'When it is done, a user message starting with "[A<n> · done]" arrives; it may arrive while you are busy with something else.',
+        'Mention the returned A<n> when you refer to the action in your replies.',
+        'Write the action and its context in the language the human uses.',
+        'Only the main session or the team lead calls this. A subagent or teammate never does: it returns the action to the agent that started it or sends it to the lead, and that session registers it.',
+      ].join(' '),
+      inputSchema: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', description: 'What the human has to do, one sentence.' },
+          context: { type: 'string', description: 'The minimum context needed to do it without reading the chat.' },
+          url: { type: 'string', description: 'A link where the action is done, if any: the pull request, the page to test.' },
+        },
+        required: ['action'],
+      },
+      isDeferred: false,
+    })
+
+    await $.tool.register({
+      name: 'action_close',
+      description:
+        'Remove a pending action from the side pane without it being done, because it no longer matters. Actions the human marks done leave the pane by themselves.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          n: { type: 'number', description: 'The action number, the n of A<n>.' },
+          reason: { type: 'string', description: 'Why it no longer matters, in the human language.' },
+        },
+        required: ['n'],
+      },
+      isDeferred: false,
+    })
+
     await $.command.register({ name: 'questions', description: 'Opens the pending questions pane' })
 
     if ((await read($, questions)).length === 0) {
       const stored = await $.store.get(storeKey)
       if (isQuestionList(stored) && stored.length > 0) {
         await update($, questions, () => stored.map(({ queuedAt: _, ...q }) => q))
+      }
+    }
+    if ((await read($, actions)).length === 0) {
+      const stored = await $.store.get(actionsKey)
+      if (isActionList(stored) && stored.length > 0) {
+        await update($, actions, () => stored.map(({ queuedAt: _, ...a }) => a))
       }
     }
     await update($, now, () => new Date().toISOString())
@@ -468,10 +584,54 @@ export const register: Register = (on, options) => {
     return { result: `Q${n} removed from the pane.` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
 
+  on('tool.call', { tool: ACTION_OPEN_TOOL }, async ($, e) => {
+    if (e.agentId !== undefined) {
+      return {
+        deny: 'Subagents and teammates never call this. Put the action in your reply to the agent that started you, or send it to the lead; that session registers it for the human.',
+      }
+    }
+    const input = e as unknown as ActionOpenInput
+    const action = typeof input.action === 'string' ? input.action.trim() : ''
+    if (action === '') return { deny: 'action is required.' }
+
+    const n = Number((await $.store.get(actionSeqKey)) ?? 0) + 1
+    await $.store.set(actionSeqKey, n)
+    const url = typeof input.url === 'string' ? input.url.trim() : ''
+    const askedAt = new Date().toISOString()
+    const entry: Action = {
+      n,
+      action,
+      context: typeof input.context === 'string' ? input.context.trim() : '',
+      ...(url !== '' ? { url } : {}),
+      askedAt,
+    }
+    await update($, actions, all => [...all, entry])
+    await save($)
+    await chime($, sound)
+    void $.ui.open({ id: PANE, title: TITLE })
+
+    return {
+      result: `Registered as A${n}, asked ${stampOf(askedAt)}. It stays in the human's pane until marked done. Refer to it as A${n}.`,
+    }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
+
+  on('tool.call', { tool: ACTION_CLOSE_TOOL }, async ($, e) => {
+    const { n } = e as unknown as CloseInput
+    const list = await read($, actions)
+    if (typeof n !== 'number' || !list.some(a => a.n === n)) return { deny: `There is no pending A${String(n)}.` }
+    await update($, actions, all => all.filter(a => a.n !== n))
+    await update($, view, current => (current.kind === 'action' && current.n === n ? ACTIONS : current))
+    await save($)
+    return { result: `A${n} removed from the pane.` }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: 'pending-questions failed; ask the human in the chat instead.' }))
+
   on('prompt.submit', async ($, e, next) => {
     const result = await next(e)
-    const n = e.command || !ANSWER_ORIGINS.has(e.origin.kind) ? undefined : answeredRef(e.text)
+    if (e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
+    const n = answeredRef(e.text)
     if (n !== undefined) await resolveQuestion($, n)
+    const done = doneRef(e.text)
+    if (done !== undefined) await resolveAction($, done)
     return result
   }).catch(($, e, next) => next(e))
 
@@ -489,6 +649,7 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
     const list = await read($, questions)
+    const todo = await read($, actions)
     const current = await read($, view)
     const stamp = await read($, now)
     const at = stamp ? new Date(stamp) : new Date()
@@ -519,6 +680,66 @@ export const register: Register = (on, options) => {
             </Box>
           )}
         </Box>
+      )
+    }
+
+    if (current.kind === 'actions' || current.kind === 'action') {
+      const openAction = current.kind === 'action' ? todo.find(a => a.n === current.n) : undefined
+      if (openAction) {
+        const n = openAction.n
+        return withScrollbar(
+          `a:${n}:${openAction.queuedAt ? 'sent' : 'open'}`,
+          actionDetailRows(openAction, at, columns),
+          <Box flexDirection="column" gap={1}>
+            <Button key="back-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
+              ← All actions
+            </Button>
+            <Box flexDirection="column">
+              <Text bold>
+                A{n} · asked {stampOf(openAction.askedAt)} <Text dimColor>· {ageOf(openAction.askedAt, at)}</Text>
+              </Text>
+              <Text>{openAction.action}</Text>
+            </Box>
+            {openAction.context !== '' && <Text dimColor>{openAction.context}</Text>}
+            {openAction.url && <Text color="suggestion">{openAction.url}</Text>}
+            {openAction.queuedAt ? (
+              <Text color="warning">{doneLineOf(openAction.queuedAt)}</Text>
+            ) : (
+              <Button key="action-done" variant="primary" onPress={() => void markDone($, n)}>
+                Done
+              </Button>
+            )}
+          </Box>,
+        )
+      }
+      return withScrollbar(
+        `actions:${todo.map(a => `${a.n}${a.queuedAt ? 's' : ''}`).join(',')}`,
+        actionListRows(todo, at, columns),
+        <Box flexDirection="column" gap={1}>
+          <Button key="to-questions" plain onPress={() => void update($, view, () => LIST)}>
+            ← Questions ({list.length})
+          </Button>
+          {todo.length === 0 ? (
+            <Text dimColor>No pending actions.</Text>
+          ) : (
+            [...todo]
+              .sort((a, b) => a.askedAt.localeCompare(b.askedAt))
+              .map(a => (
+                <Box flexDirection="column">
+                  <Text>
+                    A{a.n} · {clockOf(a.askedAt)}{' '}
+                    <Text dimColor>
+                      · {ageOf(a.askedAt, at)}
+                      {a.queuedAt ? ' · ⏳ queued' : ''}
+                    </Text>
+                  </Text>
+                  <Button key={`a-${a.n}`} plain onPress={() => void update($, view, () => ({ kind: 'action', n: a.n }) as View)}>
+                    <Text wrap="wrap">{a.action}</Text>
+                  </Button>
+                </Box>
+              ))
+          )}
+        </Box>,
       )
     }
 
@@ -596,13 +817,31 @@ export const register: Register = (on, options) => {
       )
     }
 
-    if (list.length === 0) return <Text dimColor>No pending questions.</Text>
+    const toActions =
+      todo.length > 0 ? (
+        <Button key="to-actions" plain onPress={() => void update($, view, () => ACTIONS)}>
+          🛠 Actions ({todo.length}) →
+        </Button>
+      ) : undefined
+
+    if (list.length === 0) {
+      drawnKey = ''
+      return toActions ? (
+        <Box flexDirection="column" gap={1}>
+          {toActions}
+          <Text dimColor>No pending questions.</Text>
+        </Box>
+      ) : (
+        <Text dimColor>No pending questions.</Text>
+      )
+    }
 
     const showDays = spansDays(list, at)
     return withScrollbar(
-      `list:${showDays ? 'days' : 'today'}:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
-      listRows(list, at, columns),
+      `list:${showDays ? 'days' : 'today'}:${todo.length > 0 ? 'actions:' : ''}${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      listRows(list, at, columns) + (toActions ? 2 : 0),
       <Box flexDirection="column" gap={1}>
+        {toActions}
         {groupByDay(list, at).map(group => (
           <Box flexDirection="column" gap={1}>
             {showDays && <Text dimColor>── {group.label} ──</Text>}
