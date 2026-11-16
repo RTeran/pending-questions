@@ -177,6 +177,69 @@ export const actionDetailRows = (a: Action, at: Date, columns: number) =>
     a.queuedAt ? rowsOf(doneLineOf(a.queuedAt), columns) : 1,
   ])
 
+export const normalize = (text: string) => {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').map(line => line.trimEnd())
+  const kept = lines.filter((line, i) => line !== '' || (i > 0 && lines[i - 1] !== ''))
+  while (kept[0] === '') kept.shift()
+  while (kept[kept.length - 1] === '') kept.pop()
+  return kept.length === 0 ? '' : `${kept.join('\n')}\n`
+}
+
+export const hashOf = (text: string) => {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) {
+    hash ^= text.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+const CHECKBOX = /^\s*[-*+]\s+\[([ xX])\]\s+(.*)$/
+const HEADING = /^#{1,6}\s+(.*)$/
+
+const outlineOf = (text: string) => {
+  const items = new Map<string, boolean>()
+  const headings = new Set<string>()
+  for (const line of normalize(text).split('\n')) {
+    const item = CHECKBOX.exec(line)
+    if (item) {
+      const label = item[2]?.trim() ?? ''
+      if (!items.has(label)) items.set(label, item[1] !== ' ')
+      continue
+    }
+    const heading = HEADING.exec(line)
+    if (heading) headings.add(heading[1]?.trim() ?? '')
+  }
+  return { items, headings }
+}
+
+export type TasksChange = { done: number; reopened: number; added: number; sections: number; isNotable: boolean; text: string }
+
+export const summarizeChange = (prev: string, next: string): TasksChange => {
+  const before = outlineOf(prev)
+  const after = outlineOf(next)
+  let done = 0
+  let reopened = 0
+  let added = 0
+  for (const [label, isChecked] of after.items) {
+    const was = before.items.get(label)
+    if (was === undefined) added++
+    else if (!was && isChecked) done++
+    else if (was && !isChecked) reopened++
+  }
+  const sections = [...after.headings].filter(heading => !before.headings.has(heading)).length
+  const counts = ([
+    [done, 'done'],
+    [reopened, 'reopened'],
+    [added, 'added'],
+  ] as const).filter(([count]) => count > 0)
+  const all = [
+    ...counts.map(([count, word], i) => (i === 0 ? `${countOf(count, 'task', 'tasks')} ${word}` : `${count} ${word}`)),
+    ...(sections > 0 ? [countOf(sections, 'new section', 'new sections')] : []),
+  ]
+  return { done, reopened, added, sections, isNotable: all.length > 0, text: all.join(', ') }
+}
+
 export type Thumb = { start: number; size: number }
 
 export const thumbOf = ({ offset, bodyRows, contentRows }: { offset: number; bodyRows: number; contentRows: number }) => {

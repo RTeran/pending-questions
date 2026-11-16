@@ -10,7 +10,10 @@ import {
   soundOf,
   detailRows,
   groupByDay,
+  hashOf,
   isUnknownSound,
+  normalize,
+  summarizeChange,
   listRows,
   rowsOf,
   spansDays,
@@ -850,4 +853,40 @@ test('a view stored by the previous version is read as the list', async ($, on) 
   expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
   expect(await ui.find({ type: 'Input', key: 'answer-1' })).toBeUndefined()
   await ui.unmount()
+})
+
+describe('tasks helpers', () => {
+  test('normalizing drops trailing spaces, blank runs and line-ending noise', async () => {
+    expect(normalize('# T  \r\n\n\n\n- [ ] a \n\n')).toBe('# T\n\n- [ ] a\n')
+    expect(normalize('\n\n- [ ] a')).toBe('- [ ] a\n')
+    expect(normalize('')).toBe('')
+  })
+
+  test('texts that normalize alike share a hash', async () => {
+    expect(hashOf(normalize('- [ ] a  \n\n\n'))).toBe(hashOf(normalize('- [ ] a')))
+    expect(hashOf('- [ ] a\n')).not.toBe(hashOf('- [x] a\n'))
+    expect(hashOf('')).toMatch(/^[0-9a-f]{8}$/)
+  })
+
+  test('checking boxes counts as tasks done', async () => {
+    const change = summarizeChange('- [ ] a\n- [ ] b\n- [ ] c\n', '- [x] a\n* [X] b\n- [ ] c\n')
+    expect(change).toMatchObject({ done: 2, reopened: 0, added: 0, sections: 0, isNotable: true })
+    expect(change.text).toBe('2 tasks done')
+  })
+
+  test('new items, reopened items and new headings are counted', async () => {
+    const change = summarizeChange('# A\n- [x] a\n', '# A\n- [ ] a\n## B\n- [ ] b\n- [x] c\n')
+    expect(change).toMatchObject({ done: 0, reopened: 1, added: 2, sections: 1, isNotable: true })
+    expect(change.text).toBe('1 task reopened, 2 added, 1 new section')
+  })
+
+  test('a done and an added task read like the brief', async () => {
+    expect(summarizeChange('- [ ] a\n- [ ] b\n', '- [x] a\n- [x] b\n- [ ] c\n').text).toBe('2 tasks done, 1 added')
+  })
+
+  test('prose edits and removed items are not notable', async () => {
+    expect(summarizeChange('Intro\n- [ ] a\n- [ ] b\n', 'Intro, longer\n- [ ] a\n').isNotable).toBe(false)
+    expect(summarizeChange('# A\n', '# A\nsome notes\n').isNotable).toBe(false)
+    expect(summarizeChange('- [ ] a\n', '- [ ] a\n').text).toBe('')
+  })
 })
