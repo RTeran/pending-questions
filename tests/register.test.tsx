@@ -1600,6 +1600,24 @@ describe('tasks review', () => {
     await ui.unmount()
   })
 
+  test('the tasks file is still watched after a /resume', async ($, on) => {
+    const { fs, clock, toasts } = engine(on)
+    await $.session.start(START)
+    await $.session.end({ reason: 'resume', sessionId: 'session-1' } as never)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(10_000)
+    expect(toasts).toContain('1 task done')
+  })
+
+  test('the tasks file is no longer watched once the session exits', async ($, on) => {
+    const { fs, clock, toasts } = engine(on)
+    await $.session.start(START)
+    await $.session.end({ reason: 'other', sessionId: 'session-1' } as never)
+    fs.write('/repo/TASKS.md', '# Tasks\n- [x] one\n- [ ] two\n')
+    await clock.advance(10_000)
+    expect(toasts.filter(text => /task/.test(text))).toEqual([])
+  })
+
   test('a tasks setup that fails still restores the questions and polls', async ($, on) => {
     const { fs, clock, logs } = engine(on, { 'open:session-1': [question(7, new Date().toISOString())], 'seq:session-1': 7 })
     fs.failRoot()

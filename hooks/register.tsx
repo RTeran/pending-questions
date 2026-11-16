@@ -943,7 +943,7 @@ export const register: Register = (on, options) => {
 
   on('session.end', async ($, e, next) => {
     const result = await next(e)
-    if (e.reason !== 'clear') {
+    if (e.reason !== 'clear' && e.reason !== 'resume') {
       polling?.cancel()
       polling = undefined
     }
