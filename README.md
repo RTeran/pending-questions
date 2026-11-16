@@ -81,6 +81,10 @@ format. Two kinds of file are understood:
   `<path>`, using `- [ ]` / `- [x]` checkboxes." When the file has content but no checkboxes, it
   says: "…your task list is in `<path>`; keep its current format."
 
+  Where an organization's policy plugin skips the prompt events of the plugins you install, this
+  line is not sent: `claude --debug` then logs `pending-questions: prompt.compose bypassed by …`.
+  In that case the agent's own instructions must say which file to keep and in which format.
+
 ## Notifications
 
 - A new question, a new action or a notable task change plays a sound and opens the pane on that
