@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, Register } from 'claude-code'
+import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Option, Question, View } from '../types'
+import type { Option, Question, ScrollCache, View } from '../types'
 
 const PANE = 'pending-questions'
 const TITLE = 'Pending questions'
@@ -18,6 +18,11 @@ const view = atom({ plugin: 'pending-questions', key: 'view' } as const, { kind:
 const LIST: View = { kind: 'list' }
 
 const now = atom({ plugin: 'pending-questions', key: 'now' } as const, '')
+
+const scroll = atom({ plugin: 'pending-questions', key: 'scroll' } as const, { key: '', contentRows: 0 } as ScrollCache, {
+  shape: 'scroll-1',
+})
+let drawnKey = ''
 
 const pad = (n: number) => String(n).padStart(2, '0')
 
@@ -376,6 +381,21 @@ export const register: Register = on => {
     return result
   }).catch(($, e, next) => next(e))
 
+  on('ui.scroll', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    const result = await next(e)
+    const key = drawnKey
+    if (key === '') return result
+    try {
+      const cached = await read($, scroll)
+      if (cached.key !== key || cached.contentRows !== e.contentRows) {
+        await update($, scroll, () => ({ key, contentRows: e.contentRows }))
+      }
+    } catch {
+      // The bar falls back to the estimate; the scroll itself already happened.
+    }
+    return result
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button, Input } = $.ui.resolve(e)
     const list = await read($, questions)
@@ -384,10 +404,39 @@ export const register: Register = on => {
     const at = stamp ? new Date(stamp) : new Date()
 
     const open = current.kind === 'question' ? list.find(q => q.n === current.n) : undefined
+    const cached = await read($, scroll)
+    const columns = Math.max(1, e.props.bodyColumns - 1)
+
+    const withScrollbar = (key: string, estimate: number, content: RenderNode) => {
+      drawnKey = `${key}:${columns}`
+      const { offset, bodyRows } = e.props.scroll
+      const contentRows = cached.key === drawnKey ? cached.contentRows : estimate
+      const thumb = thumbOf({ offset, bodyRows, contentRows })
+      return (
+        <Box flexDirection="column" position="relative" paddingRight={1}>
+          {content}
+          {thumb && (
+            <Box key="scrollbar" position="absolute" right={0} top={offset} height={bodyRows} flexDirection="column">
+              {Array.from({ length: bodyRows }, (_, row) =>
+                row >= thumb.start && row < thumb.start + thumb.size ? (
+                  <Text key={`scrollbar-${row}`}>█</Text>
+                ) : (
+                  <Text key={`scrollbar-${row}`} dimColor>
+                    │
+                  </Text>
+                ),
+              )}
+            </Box>
+          )}
+        </Box>
+      )
+    }
 
     if (open) {
       const n = open.n
-      return (
+      return withScrollbar(
+        `q:${n}:${open.queuedAt ? 'sent' : 'open'}`,
+        detailRows(open, at, columns),
         <Box flexDirection="column" gap={1}>
           <Button key="back" plain onPress={() => void update($, view, () => LIST)}>
             ← All questions
@@ -416,7 +465,7 @@ export const register: Register = on => {
             </Box>
           )}
           {open.queuedAt ? (
-            <Text color="warning">⏳ Sent at {clockOf(open.queuedAt)}: it arrives when the lead ends its turn.</Text>
+            <Text color="warning">{sentLineOf(open.queuedAt)}</Text>
           ) : (
             <Box flexDirection="column">
               <Input
@@ -453,14 +502,16 @@ export const register: Register = on => {
               </Box>
             </Box>
           )}
-        </Box>
+        </Box>,
       )
     }
 
     if (list.length === 0) return <Text dimColor>No pending questions.</Text>
 
     const showDays = spansDays(list, at)
-    return (
+    return withScrollbar(
+      `list:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,
+      listRows(list, at, columns),
       <Box flexDirection="column" gap={1}>
         {groupByDay(list, at).map(group => (
           <Box flexDirection="column" gap={1}>
@@ -481,7 +532,7 @@ export const register: Register = on => {
             ))}
           </Box>
         ))}
-      </Box>
+      </Box>,
     )
   })
 }

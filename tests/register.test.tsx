@@ -53,6 +53,7 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') 
     return { value: { tool: e.name } }
   })
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.scroll', () => ({}))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.read', () => ({ value: { text: '', cursor: 0 } }))
   on('prompt.submit', (_, e) => {
@@ -279,5 +280,96 @@ describe('scrollbar helpers', () => {
     const bare = detailRows(q, at, 60)
     expect(detailRows({ ...q, context: 'word '.repeat(60).trim() }, at, 60)).toBe(bare + 1 + 5)
     expect(detailRows({ ...q, options: [{ key: 'A', label: 'Yes' }, { key: 'B', label: 'No' }] }, at, 60)).toBe(bare + 1 + 2)
+  })
+})
+
+const sized = (bodyRows: number, offset = 0) => ({ ...PANE, props: { ...PANE.props, scroll: { offset, bodyRows } } })
+
+const scrolled = (offset: number, bodyRows: number, contentRows: number) =>
+  ({
+    component: 'Pane',
+    requestId: 'pending-questions',
+    offset,
+    by: offset,
+    bodyRows,
+    contentRows,
+    origin: { kind: 'person' },
+  }) as never
+
+const thumbRows = async (ui: { find: (q: { type: string; key: string }) => Promise<{ children: unknown[] } | undefined> }) =>
+  ((await ui.find({ type: 'Box', key: 'scrollbar' }))?.children ?? []).flatMap((row, i) => (JSON.stringify(row).includes('█') ? [i] : []))
+
+describe('scrollbar', () => {
+  test('a list taller than the pane shows a scrollbar with the thumb at the top', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    const bar = await ui.find({ type: 'Box', key: 'scrollbar' })
+    expect(bar?.props).toMatchObject({ position: 'absolute', right: 0, top: 0, height: 5 })
+    expect(await ui.findAll({ type: 'Text', text: /^[│█]$/ })).toHaveLength(5)
+    expect(await thumbRows(ui)).toEqual([0])
+
+    await ui.redraw(sized(5, 12).props)
+    expect((await ui.find({ type: 'Box', key: 'scrollbar' }))?.props).toMatchObject({ top: 12 })
+    expect(await thumbRows(ui)).toEqual([4])
+    await ui.unmount()
+  })
+
+  test('a list that fits shows no scrollbar', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: OPEN, question: 'two' })
+
+    const ui = await $.ui.mount(sized(40))
+    expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('a question with a long context shows a scrollbar', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'long', context: 'word '.repeat(200).trim() })
+
+    const ui = await $.ui.mount(sized(10))
+    expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
+    await ui.press({ key: 'q-1' })
+    expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('the thumb follows the content height the engine reports on a scroll', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    await $.ui.scroll(scrolled(12, 5, 40))
+    await ui.redraw(sized(5, 12).props)
+    expect(await thumbRows(ui)).toEqual([1])
+    await ui.unmount()
+  })
+
+  test('a content height reported for other content is not reused', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    for (const n of [1, 2, 3, 4, 5, 6]) await $.tool.call({ tool: OPEN, question: `question ${n}` })
+
+    const ui = await $.ui.mount(sized(5))
+    await $.ui.scroll(scrolled(12, 5, 40))
+    for (const n of [2, 3, 4, 5, 6]) await $.tool.call({ tool: CLOSE, n })
+    await ui.redraw(sized(5, 0).props)
+    expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('the empty state has no scrollbar', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const ui = await $.ui.mount(sized(1))
+    expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
+    await ui.unmount()
   })
 })
