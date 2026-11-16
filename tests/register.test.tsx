@@ -858,6 +858,14 @@ describe('actions', () => {
     await ui.unmount()
   })
 
+  test('a subagent may close an action, as it may close a question', async ($, on) => {
+    engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+    const closed = await $.tool.call({ tool: ACTION_CLOSE, n: 1, agentId: 'impl-1' })
+    expect(String(closed.result)).toBe('A1 removed from the pane.')
+  })
+
   test('closing an action needs its number', async ($, on) => {
     engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
@@ -1376,6 +1384,35 @@ describe('a /clear', () => {
 
     const ui = await $.ui.mount(PANE)
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('that drops the session state brings the open items back from the store', async ($, on) => {
+    const { control } = engine(on)
+    const lost = new Map<string, { value: unknown; version: number }>()
+    on('state.get', (_, e, next) => {
+      const fresh = lost.get(e.key)
+      return fresh ? { value: { value: fresh.value, version: fresh.version } } : next(e)
+    })
+    on('state.set', (_, e, next) => {
+      const fresh = lost.get(e.key)
+      if (!fresh) return next(e)
+      if (e.ifVersion !== undefined && e.ifVersion !== fresh.version) return { value: { isSet: false, version: fresh.version } }
+      lost.set(e.key, { value: e.value, version: fresh.version + 1 })
+      return { value: { isSet: true, version: fresh.version + 1 } }
+    })
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: OPEN, question: 'two' })
+
+    control.clear('session-2')
+    for (const key of ['questions', 'actions', 'chain']) lost.set(key, { value: undefined, version: 0 })
+    await $.prompt.submit(answer('[Q2 · asked 2026-11-11 10:42] ok'))
+    expect(String((await $.tool.call({ tool: OPEN, question: 'three' })).result)).toMatch(/^Registered as Q3,/)
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'q-2' })).toBeUndefined()
     await ui.unmount()
   })
 

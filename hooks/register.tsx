@@ -380,37 +380,62 @@ type CloseInput = { n?: unknown; reason?: unknown }
 type ActionOpenInput = { action?: unknown; context?: unknown; url?: unknown }
 
 // A /clear gives the process a new session id without a session.start. The store keys stay
-// on the id the chain started with, so open items and their numbering outlive the /clear;
-// the alias lets a reload whose $.state was lost find that id again.
+// on the id the chain started with, so open items and their numbering outlive the /clear.
+// An empty chain atom means $.state is new (a new process, or a /clear that dropped it):
+// the alias finds the chain again and the open items come back from the store.
 const chain = atom({ plugin: 'pending-questions', key: 'chain' } as const, '')
 let chainId = ''
 let seenId = ''
 
 async function keysOf($: Engine) {
   const id = await $.session.id()
+  const known = await read($, chain)
   if (chainId === '') {
     const alias = await $.store.get(`alias:${id}`)
-    chainId = (await read($, chain)) || (typeof alias === 'string' && alias !== '' ? alias : id)
-    await update($, chain, () => chainId)
+    chainId = known || (typeof alias === 'string' && alias !== '' ? alias : id)
+  }
+  const keys = {
+    open: `open:${chainId}`,
+    seq: `seq:${chainId}`,
+    actions: `actions:${chainId}`,
+    actionSeq: `aseq:${chainId}`,
   }
   if (id !== seenId) {
     seenId = id
     if (id !== chainId) await $.store.set(`alias:${id}`, chainId)
   }
-  return {
-    open: `open:${chainId}`,
-    seq: `seq:${chainId}`,
-    actions: `actions:${chainId}`,
-    actionSeq: `aseq:${chainId}`,
+  if (known === '') {
+    await update($, chain, () => chainId)
+    await restoreLists($, keys)
+  }
+  return keys
+}
+
+async function restoreLists($: Engine, keys: { open: string; actions: string }) {
+  if ((await read($, questions)).length === 0) {
+    const stored = await $.store.get(keys.open)
+    if (isQuestionList(stored) && stored.length > 0) {
+      await update($, questions, () => stored.map(({ queuedAt: _, ...q }) => q))
+    } else if (stored !== undefined && !isQuestionList(stored)) {
+      logDebug($, `the stored questions are in an unknown shape and were not restored`)
+    }
+  }
+  if ((await read($, actions)).length === 0) {
+    const stored = await $.store.get(keys.actions)
+    if (isActionList(stored) && stored.length > 0) {
+      await update($, actions, () => stored.map(({ queuedAt: _, ...a }) => a))
+    } else if (stored !== undefined && !isActionList(stored)) {
+      logDebug($, `the stored actions are in an unknown shape and were not restored`)
+    }
   }
 }
 
 const countOf = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
 
 async function save($: Engine) {
+  const keys = await keysOf($)
   const list = await read($, questions)
   const todo = await read($, actions)
-  const keys = await keysOf($)
   await $.store.set(keys.open, list)
   await $.store.set(keys.actions, todo)
   const parts = [
@@ -721,7 +746,7 @@ export const register: Register = (on, options) => {
 
     chainId = ''
     seenId = ''
-    const keys = await keysOf($)
+    await keysOf($)
 
     await $.tool.register({
       name: 'question_open',
@@ -827,22 +852,6 @@ export const register: Register = (on, options) => {
     polling?.cancel()
     polling = $.clock.every(TASKS_POLL_MS, () => void observe($, sound, true))
 
-    if ((await read($, questions)).length === 0) {
-      const stored = await $.store.get(keys.open)
-      if (isQuestionList(stored) && stored.length > 0) {
-        await update($, questions, () => stored.map(({ queuedAt: _, ...q }) => q))
-      } else if (stored !== undefined && !isQuestionList(stored)) {
-        logDebug($, `the stored questions are in an unknown shape and were not restored`)
-      }
-    }
-    if ((await read($, actions)).length === 0) {
-      const stored = await $.store.get(keys.actions)
-      if (isActionList(stored) && stored.length > 0) {
-        await update($, actions, () => stored.map(({ queuedAt: _, ...a }) => a))
-      } else if (stored !== undefined && !isActionList(stored)) {
-        logDebug($, `the stored actions are in an unknown shape and were not restored`)
-      }
-    }
     await update($, now, () => new Date().toISOString())
     $.clock.every(60_000, () => void update($, now, () => new Date().toISOString()))
     await save($)
@@ -977,6 +986,7 @@ export const register: Register = (on, options) => {
     const result = await next(e)
     if (e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
     try {
+      await keysOf($)
       const n = answeredRef(e.text)
       if (n !== undefined) await resolveQuestion($, n)
       const done = doneRef(e.text)
