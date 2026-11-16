@@ -193,15 +193,21 @@ const engine = (
   const pluginSubmits: string[] = []
   let isSubmitFailing = false
   let held: Promise<void> | undefined
+  let messageCount = 0
+  on('session.messages', () => ({ value: Array.from({ length: messageCount }, () => ({ role: 'user' as const, text: '', toolUses: [] })) }))
   on('prompt.submit', async (_, e) => {
+    messageCount += 2
     submitted.push(e.text)
     if (e.origin.kind === 'plugin') pluginSubmits.push(e.text)
     if (isStoreFailingAfterSubmit) isStoreFailing = true
     if (held) await held
     if (isSubmitFailing) throw new Error('the lead is gone')
-    return { text: e.text }
+    return { text: e.text, context: e.context }
   })
   const control = {
+    shortenConversation: () => {
+      messageCount = 1
+    },
     failSubmits: () => {
       isSubmitFailing = true
     },
@@ -1163,18 +1169,12 @@ describe('tasks helpers', () => {
 
 const START = { cwd: '/repo', surface: 'terminal', isInteractive: true } as const
 
-const taskSection = async ($: { prompt: { compose: (args: object) => Promise<{ sections: readonly { id: string; text: string }[] }> } }, args: object = {}) =>
-  (
-    await $.prompt.compose({
-      model: 'claude-test',
-      promptModel: 'claude-test',
-      surfaces: ['terminal'],
-      tools: [],
-      outputStyle: null,
-      traits: [],
-      ...args,
-    })
-  ).sections.find(section => section.id === 'pending-questions:tasks')?.text
+const TASKS_LINE = /^If you are the main session, not a subagent or a teammate, /
+
+const taskSection = async (
+  $: { prompt: { submit: (args: object) => Promise<{ context?: readonly string[] }> } },
+  origin: object = { kind: 'composer' },
+) => (await $.prompt.submit({ text: 'hi', wait: false, origin })).context?.find(text => TASKS_LINE.test(text))
 
 describe('tasks source', () => {
   test('a path stored for the project wins over the option and the default', { options: { tasksFile: 'plan/todo.md' } }, async ($, on) => {
@@ -1195,10 +1195,47 @@ describe('tasks source', () => {
     expect(await taskSection($ as never)).toMatch(/in \/repo\/TASKS\.md,/)
   })
 
-  test('a teammate prompt gets no task instruction', async ($, on) => {
+  test('a peer prompt gets no task instruction', async ($, on) => {
     engine(on)
     await $.session.start(START)
-    expect(await taskSection($ as never, { traits: ['teammate'] })).toBeUndefined()
+    expect(await taskSection($ as never, { kind: 'peer' })).toBeUndefined()
+  })
+
+  test('the task instruction is sent once, and again when it changes or the conversation gets shorter', async ($, on) => {
+    const { fs, clock, control } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ ...START, isInteractive: false })
+    expect(await taskSection($ as never)).toMatch(/keep your task list in \/repo\/TASKS\.md, using/)
+    expect(await taskSection($ as never)).toBeUndefined()
+
+    fs.write('/repo/TASKS.md', CLICKUP)
+    await clock.advance(10_000)
+    expect(await taskSection($ as never)).toMatch(/keep its current format/)
+    expect(await taskSection($ as never)).toBeUndefined()
+
+    control.shortenConversation()
+    expect(await taskSection($ as never)).toMatch(/keep its current format/)
+  })
+
+  test('the task instruction is sent again after a /resume', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    expect(await taskSection($ as never)).toBeDefined()
+    await $.session.end({ reason: 'resume', sessionId: 'session-1' } as never)
+    expect(await taskSection($ as never)).toBeDefined()
+  })
+
+  test('the plugin no longer hooks the system prompt', async ($, on) => {
+    engine(on)
+    await $.session.start(START)
+    const sections = (await ($ as never as { prompt: { compose: (args: object) => Promise<{ sections: readonly { id: string }[] }> } }).prompt.compose({
+      model: 'claude-test',
+      promptModel: 'claude-test',
+      surfaces: ['terminal'],
+      tools: [],
+      outputStyle: null,
+      traits: [],
+    })).sections
+    expect(sections.some(section => section.id === 'pending-questions:tasks')).toBe(false)
   })
 
   test('a teammate process gets no task instruction and no polling', async ($, on) => {

@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
+import type { EngineInterface as Engine, PromptSubmitInput, Register, RenderNode } from 'claude-code'
 
 import type { Action, ChainState, Option, Question, ScrollCache, Section, TasksSource, Unseen, View } from '../types'
 
@@ -1020,6 +1020,38 @@ async function useTasksPath($: Engine, sound: Sound, path: string, isConfirmed: 
   await observe($, sound, true)
 }
 
+let sentTasksLine = ''
+let messagesAtLastPrompt = 0
+
+async function messageCountOf($: Engine) {
+  try {
+    const messages = await $.session.messages()
+    return Array.isArray(messages) ? messages.length : 0
+  } catch (error) {
+    logDebug($, `the conversation length could not be read: ${String(error)}`)
+    return 0
+  }
+}
+
+// The line rides beside the human's prompt rather than in the system prompt: an organization's
+// policy plugin skips other plugins' prompt.compose hooks, but keeps their prompt.submit context.
+// It is sent again when it changes or when the conversation got shorter (a /compact or a /clear).
+async function withTasksLine($: Engine, e: PromptSubmitInput): Promise<PromptSubmitInput> {
+  if (!isLead || tasksPath === '' || e.command || e.isMeta || !ANSWER_ORIGINS.has(e.origin.kind)) return e
+  try {
+    const text = tasksInstructionOf(tasksPath, await read($, tasks))
+    const count = await messageCountOf($)
+    const isShorter = count < messagesAtLastPrompt
+    messagesAtLastPrompt = count
+    if (text === sentTasksLine && !isShorter) return e
+    sentTasksLine = text
+    return { ...e, context: [...(e.context ?? []), text] }
+  } catch (error) {
+    logDebug($, `the tasks line was not sent with the prompt: ${String(error)}`)
+    return e
+  }
+}
+
 export async function isTeammateProcess($: Engine) {
   try {
     const { stdout } = await $.process.run(['/bin/sh', '-c', TEAMMATE_PROBE], { timeoutMs: 3000 })
@@ -1166,6 +1198,8 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    sentTasksLine = ''
+    messagesAtLastPrompt = 0
     if (isLead) {
       try {
         await noteSessionEnd($, e.reason)
@@ -1294,18 +1328,8 @@ export const register: Register = (on, options) => {
     return result
   })
 
-  on('prompt.compose', async ($, e, next) => {
-    const result = await next(e)
-    if (!isLead || tasksPath === '' || e.traits.includes('teammate')) return result
-    const text = tasksInstructionOf(tasksPath, await read($, tasks))
-    return { sections: [...result.sections, { id: 'pending-questions:tasks', text, scope: 'session' as const }] }
-  }).catch(($, e, next) => {
-    logDebug($, 'the tasks instruction was left out of the system prompt')
-    return next(e)
-  })
-
   on('prompt.submit', async ($, e, next) => {
-    const result = await next(e)
+    const result = await next(await withTasksLine($, e))
     if (!isLead || e.command || !ANSWER_ORIGINS.has(e.origin.kind)) return result
     try {
       await keysOf($)

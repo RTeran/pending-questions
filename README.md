@@ -78,14 +78,16 @@ format. Two kinds of file are understood:
   never counts as a change.
 - The Tasks button and the status line count checkboxes done out of all checkboxes; in a file with
   no checkboxes, they count tasks whose status is `done` out of all tasks with a status.
-- The main session's system prompt names the file. When the file is missing or has checkboxes,
+- A line sent beside your prompt names the file. When the file is missing or has checkboxes,
   it says: "If you are the main session, not a subagent or a teammate, keep your task list in
   `<path>`, using `- [ ]` / `- [x]` checkboxes." When the file has content but no checkboxes, it
   says: "…your task list is in `<path>`; keep its current format."
 
-  Where an organization's policy plugin skips the prompt events of the plugins you install, this
-  line is not sent: `claude --debug` then logs `pending-questions: prompt.compose bypassed by …`.
-  In that case the agent's own instructions must say which file to keep and in which format.
+  The line goes with your first prompt of the session, and again when it changes, after a
+  `/clear` or a `/resume`, and when the conversation the plugin reads gets shorter. Whether that
+  read gets shorter after a `/compact` is not confirmed yet. It does not touch the system
+  prompt, so an organization's policy plugin that skips other plugins' system prompt hooks does
+  not block it.
 
 ## Tabs
 

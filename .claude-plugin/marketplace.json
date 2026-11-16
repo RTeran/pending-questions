@@ -8,7 +8,7 @@
       "name": "pending-questions",
       "source": "./",
       "description": "An agent inbox side pane: the questions the agent asks you, its task list and the actions only you can do, kept until you deal with them.",
-      "version": "0.5.0",
+      "version": "0.6.0",
       "category": "productivity"
     }
   ],
