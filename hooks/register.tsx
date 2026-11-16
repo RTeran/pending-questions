@@ -28,6 +28,7 @@ const NO_TASKS: TasksSource = {
   draft: '',
   isDismissed: false,
   isSetupAsked: false,
+  isConfirmed: false,
 }
 const tasks = atom({ plugin: 'pending-questions', key: 'tasks' } as const, NO_TASKS, { shape: 'tasks-1' })
 const unseen = atom(
@@ -531,8 +532,11 @@ export const taskCountsOf = (text: string) => {
 
 const hasCheckboxes = (text: string) => normalize(text).split('\n').some(line => CHECKBOX.test(line))
 
+const needsTasksSetup = (source: TasksSource) =>
+  !source.exists && source.path !== '' && !source.isDismissed && source.isConfirmed !== true
+
 const tasksLabelOf = (source: TasksSource) => {
-  if (!source.exists) return 'set up'
+  if (!source.exists) return needsTasksSetup(source) ? 'set up' : ''
   const { done, total } = taskCountsOf(source.isTooLarge ? '' : source.text)
   return total === 0 ? '' : `${done}/${total}`
 }
@@ -561,31 +565,34 @@ export const sectionOf = (shown: View): Section =>
 
 const SECTION_ORDER: readonly Section[] = ['questions', 'actions', 'tasks']
 
-const isTasksReachable = (source: TasksSource) => source.exists || (source.path !== '' && !source.isDismissed)
+const hasTasksContent = (source: TasksSource) => source.exists || needsTasksSetup(source)
 
 export const effectiveSectionOf = (preferred: Section, questionCount: number, actionCount: number, hasTasks: boolean) => {
   const hasContent: Record<Section, boolean> = { questions: questionCount > 0, actions: actionCount > 0, tasks: hasTasks }
   return hasContent[preferred] ? preferred : SECTION_ORDER.find(section => hasContent[section])
 }
 
-// An empty section is never drawn: the pane shows the first one with something instead, so
-// opening a section clears the mark of the one the human will actually see.
 async function openSection($: Engine, section: Section) {
   await update($, unseen, marks => ({ ...marks, [section]: false }))
   await update($, view, () => VIEW_OF[section])
-  await settleMarks($)
 }
 
-async function settleMarks($: Engine) {
+// A section the human picked stays shown even when empty; only when its content goes away on its
+// own does the pane move to the first section that still has something.
+async function settleView($: Engine, changed?: Section) {
   const shownView = await read($, view)
   if (shownView.kind === 'question' || shownView.kind === 'action') return
-  const shown = effectiveSectionOf(
-    sectionOf(shownView),
-    (await read($, questions)).length,
-    (await read($, actions)).length,
-    isTasksReachable(await read($, tasks)),
-  )
-  if (shown) await update($, unseen, marks => (marks[shown] ? { ...marks, [shown]: false } : marks))
+  const preferred = sectionOf(shownView)
+  if (changed && changed !== preferred) return
+  const shown =
+    effectiveSectionOf(
+      preferred,
+      (await read($, questions)).length,
+      (await read($, actions)).length,
+      hasTasksContent(await read($, tasks)),
+    ) ?? preferred
+  if (shown !== preferred) await update($, view, () => VIEW_OF[shown])
+  await update($, unseen, marks => (marks[shown] ? { ...marks, [shown]: false } : marks))
 }
 
 async function leaveDetail($: Engine, kind: 'question' | 'action', n: number) {
@@ -594,7 +601,9 @@ async function leaveDetail($: Engine, kind: 'question' | 'action', n: number) {
     isLeft = current.kind === kind && current.n === n
     return isLeft ? VIEW_OF[sectionOf(current)] : current
   })
-  if (isLeft) await update($, unseen, marks => ({ ...marks, [kind === 'question' ? 'questions' : 'actions']: false }))
+  const section = kind === 'question' ? 'questions' : 'actions'
+  if (isLeft) await update($, unseen, marks => ({ ...marks, [section]: false }))
+  await settleView($, section)
 }
 
 async function isPaneShown($: Engine) {
@@ -649,7 +658,6 @@ async function removeAction($: Engine, n: number) {
   })
   if (!isRemoved) return false
   await leaveDetail($, 'action', n)
-  await settleMarks($)
   await save($)
   return true
 }
@@ -723,7 +731,6 @@ async function resolveQuestion($: Engine, n: number) {
   })
   if (!isRemoved) return
   await leaveDetail($, 'question', n)
-  await settleMarks($)
   await save($)
   $.ui.toast(`Q${n} answered.`)
 }
@@ -964,7 +971,8 @@ async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
     const path = resolvePath(typed, tasksRoot, homeDir)
     await $.store.set(`tasksFile:${tasksRoot}`, path)
     await openSection($, 'tasks')
-    await useTasksPath($, sound, path)
+    await useTasksPath($, sound, path, true)
+    $.ui.toast(`Tasks file set to ${path}.`)
   } catch (error) {
     logDebug($, `the tasks path could not be used: ${String(error)}`)
     $.ui.toast('Could not use that path. Try again.')
@@ -974,7 +982,7 @@ async function chooseTasksPath($: Engine, sound: Sound, raw: string) {
 async function dismissTasksSetup($: Engine) {
   try {
     await update($, tasks, t => ({ ...t, isDismissed: true }))
-    await openSection($, 'questions')
+    await settleView($, 'tasks')
   } catch (error) {
     logDebug($, `the tasks setup could not be dismissed: ${String(error)}`)
     $.ui.toast('Could not close the setup. Try again.')
@@ -991,7 +999,16 @@ async function refreshOnWrite($: Engine, sound: Sound, filePath: unknown) {
   }
 }
 
-async function useTasksPath($: Engine, sound: Sound, path: string) {
+async function reopenTasksSetup($: Engine) {
+  try {
+    await update($, tasks, t => ({ ...t, isDismissed: false, isConfirmed: false, draft: t.path }))
+  } catch (error) {
+    logDebug($, `the tasks setup could not be reopened: ${String(error)}`)
+    $.ui.toast('Could not open the setup. Try again.')
+  }
+}
+
+async function useTasksPath($: Engine, sound: Sound, path: string, isConfirmed: boolean) {
   tasksPath = path
   lastStat = ''
   lastReadError = ''
@@ -999,7 +1016,7 @@ async function useTasksPath($: Engine, sound: Sound, path: string) {
   pending = { hash: '', count: 0 }
   const seen = await $.store.get(`tasksSeen:${tasksRoot}`)
   if (isSeenFor(seen, path)) committed = { hash: seen.hash, text: seen.text }
-  await update($, tasks, t => ({ ...t, path, draft: path }))
+  await update($, tasks, t => ({ ...t, path, draft: path, isConfirmed, isDismissed: isConfirmed ? false : t.isDismissed }))
   await observe($, sound, true)
 }
 
@@ -1123,14 +1140,17 @@ export const register: Register = (on, options) => {
       tasksRoot = await $.session.root()
       const storedPath = await $.store.get(`tasksFile:${tasksRoot}`)
       const optionPath = typeof options.tasksFile === 'string' ? options.tasksFile.trim() : ''
-      const path = typeof storedPath === 'string' && storedPath !== '' ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
-      await useTasksPath($, sound, resolvePath(path, tasksRoot, homeDir))
+      const isStored = typeof storedPath === 'string' && storedPath !== ''
+      const path = isStored ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
+      await useTasksPath($, sound, resolvePath(path, tasksRoot, homeDir), isStored)
       const source = await read($, tasks)
-      if (e.isInteractive && !source.exists && !source.isDismissed && !source.isSetupAsked) {
+      if (e.isInteractive && needsTasksSetup(source) && !source.isSetupAsked) {
         await update($, tasks, t => ({ ...t, isSetupAsked: true }))
         await update($, view, () => ({ kind: 'tasks-setup' }) as View)
         await chime($, sound, 'tasks')
         openPane($)
+      } else {
+        await settleView($)
       }
     } catch (error) {
       logDebug($, `the tasks file could not be set up: ${String(error)}`)
@@ -1170,6 +1190,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'questions' }, async $ => {
     await openSection($, 'questions')
+    await settleView($)
     await $.ui.open({ id: PANE, title: TITLE })
     const count = (await read($, questions)).length
     const todo = (await read($, actions)).length
@@ -1349,20 +1370,13 @@ export const register: Register = (on, options) => {
 
     const marks = await read($, unseen)
     const tasksLabel = tasksLabelOf(source)
-    const hasTasks = isTasksReachable(source)
     const openAction = current.kind === 'action' ? todo.find(a => a.n === current.n) : undefined
-    const section = open || openAction ? sectionOf(current) : effectiveSectionOf(sectionOf(current), list.length, todo.length, hasTasks)
-    if (!section) {
-      drawnKey = ''
-      return <Text dimColor>Nothing pending: no questions, actions or tasks.</Text>
-    }
+    const section = sectionOf(current)
     const entries = [
-      { section: 'questions' as const, label: `❓ Questions (${list.length})`, isShown: list.length > 0 },
-      { section: 'tasks' as const, label: `📋 Tasks${tasksLabel === '' ? '' : tasksLabel === 'set up' ? ' (set up)' : ` ${tasksLabel}`}`, isShown: hasTasks },
-      { section: 'actions' as const, label: `🛠 Actions (${todo.length})`, isShown: todo.length > 0 },
-    ]
-      .filter(entry => entry.isShown)
-      .map(entry => ({
+      { section: 'questions' as const, label: `❓ Questions (${list.length})` },
+      { section: 'actions' as const, label: `🛠 Actions (${todo.length})` },
+      { section: 'tasks' as const, label: `📋 Tasks${tasksLabel === '' ? '' : tasksLabel === 'set up' ? ' (set up)' : ` ${tasksLabel}`}` },
+    ].map(entry => ({
         ...entry,
         text: `${entry.section === section ? '▸ ' : ''}${entry.label}${marks[entry.section] ? ' (new)' : ''}`,
       }))
@@ -1405,6 +1419,23 @@ export const register: Register = (on, options) => {
       )
     }
 
+    if (section === 'tasks' && !needsTasksSetup(source)) {
+      const isDismissed = source.isDismissed && source.isConfirmed !== true
+      const notice = isDismissed
+        ? 'No tasks file in this session.'
+        : `No tasks yet. The agent keeps its task list in ${source.path}; it shows here once the file exists.`
+      return page(
+        `tasks-none:${isDismissed ? 'dismissed' : source.path}`,
+        stackRows([rowsOf(notice, columns), 1]),
+        <Box flexDirection="column" gap={1}>
+          <Text dimColor>{notice}</Text>
+          <Button key="tasks-change" onPress={() => void reopenTasksSetup($)}>
+            {isDismissed ? 'Set a path' : 'Change path'}
+          </Button>
+        </Box>,
+      )
+    }
+
     if (section === 'tasks') {
       const prompt = `There is no tasks file at ${source.path}. Where does the agent keep its task list?`
       return page(
@@ -1441,6 +1472,9 @@ export const register: Register = (on, options) => {
     }
 
     if (section === 'actions') {
+      if (!openAction && todo.length === 0) {
+        return page('actions:none', 1, <Text dimColor>No actions pending.</Text>)
+      }
       if (openAction) {
         const n = openAction.n
         return page(
@@ -1566,6 +1600,9 @@ export const register: Register = (on, options) => {
       )
     }
 
+    if (list.length === 0) {
+      return page('list:none', 1, <Text dimColor>No questions pending.</Text>)
+    }
     const showDays = spansDays(list, at)
     return page(
       `list:${showDays ? 'days' : 'today'}:${list.map(q => `${q.n}${q.queuedAt ? 's' : ''}`).join(',')}`,

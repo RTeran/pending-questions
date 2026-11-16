@@ -29,6 +29,7 @@ export type TasksSource = {
   draft: string
   isDismissed: boolean
   isSetupAsked: boolean
+  isConfirmed: boolean
 }
 
 export type Section = 'questions' | 'actions' | 'tasks'
