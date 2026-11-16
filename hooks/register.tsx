@@ -218,7 +218,19 @@ let lastSoundAt = -Infinity
 const logSoundFailure = ($: Engine, error: unknown) =>
   $.ui.log(`pending-questions: the new-question sound did not play: ${String(error)}`, { to: 'debug' })
 
-export async function ding($: Engine) {
+export type Sound = 'alert' | 'ding' | 'off'
+
+export const soundOf = (raw: unknown): Sound => (raw === 'ding' || raw === 'off' ? raw : 'alert')
+
+const ALERT_ARGV = ['/usr/bin/osascript', '-e', 'beep']
+
+async function playAlert($: Engine) {
+  const { exitCode, stderr } = await $.process.run(ALERT_ARGV, { timeoutMs: 5_000 })
+  if (exitCode !== 0) logSoundFailure($, `osascript exit code ${exitCode}: ${stderr.trim()}`)
+}
+
+export async function chime($: Engine, sound: Sound) {
+  if (sound === 'off') return
   try {
     const at = await $.clock.now()
     if (at - lastSoundAt < SOUND_GAP_MS) return
@@ -228,7 +240,7 @@ export async function ding($: Engine) {
     return
   }
   void Promise.resolve()
-    .then(() => $.audio.play(ACK_SOUND))
+    .then(() => (sound === 'alert' ? playAlert($) : $.audio.play(ACK_SOUND)))
     .catch(error => logSoundFailure($, error))
 }
 
@@ -312,7 +324,7 @@ export async function isTeammateProcess($: Engine) {
 }
 
 export const register: Register = (on, options) => {
-  const isSoundOn = options.sound !== false
+  const sound = soundOf(options.sound)
 
   on('session.start', async ($, e, next) => {
     if (await isTeammateProcess($)) return next(e)
@@ -417,7 +429,7 @@ export const register: Register = (on, options) => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
-    if (isSoundOn) await ding($)
+    await chime($, sound)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return {

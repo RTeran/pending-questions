@@ -4,9 +4,10 @@ import type { On } from 'claude-code'
 import {
   ACK_SOUND,
   answeredRef,
-  ding,
+  chime,
   answerTextOf,
   dayLabelOf,
+  soundOf,
   detailRows,
   groupByDay,
   listRows,
@@ -34,9 +35,25 @@ const PANE = {
   },
 } as const
 
-const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n', playFails = false) => {
+const ALERT = ['/usr/bin/osascript', '-e', 'beep']
+
+type AlertOutcome = 'ok' | 'exit' | 'reject'
+
+const engine = (
+  on: On,
+  stored: Record<string, unknown> = {},
+  probe = 'main\n',
+  playFails = false,
+  alert: AlertOutcome = 'ok',
+) => {
   const submitted: string[] = []
   const plays: unknown[] = []
+  const alerts: (readonly string[])[] = []
+  const logs: string[] = []
+  on('ui.log', (_, e) => {
+    logs.push(e.text)
+    return { value: undefined }
+  })
   on('audio.play', async (_, e) => {
     plays.push(e.clip)
     await Promise.resolve()
@@ -45,9 +62,18 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n', 
   })
   const tools: string[] = []
   const commands: string[] = []
-  on('process.run', () => ({
-    value: { exitCode: 0, stdout: probe, stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
-  }))
+  on('process.run', async (_, e) => {
+    const isAlert = e.argv[0] === ALERT[0]
+    if (isAlert) {
+      alerts.push(e.argv)
+      await Promise.resolve()
+      if (alert === 'reject') throw new Error('osascript did not start')
+    }
+    const exitCode = isAlert && alert === 'exit' ? 1 : 0
+    const stdout = isAlert ? '' : probe
+    const stderr = exitCode === 0 ? '' : 'execution error'
+    return { value: { exitCode, stdout, stderr, isStdoutTruncated: false, isStderrTruncated: false } }
+  })
   mock.store(on, stored)
   on('session.id', () => ({ value: 'session-1' }))
   const clock = mock.clock(on)
@@ -69,7 +95,7 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n', 
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { submitted, clock, tools, commands, plays }
+  return { submitted, clock, tools, commands, plays, alerts, logs }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -415,63 +441,99 @@ describe('sound', () => {
     expect(samples.some(v => v !== 0)).toBe(true)
   })
 
-  test('a new question plays the sound once', async ($, on) => {
-    const { plays } = engine(on)
+  test('the sound option falls back to the alert', async () => {
+    expect(soundOf('ding')).toBe('ding')
+    expect(soundOf('off')).toBe('off')
+    expect(soundOf('alert')).toBe('alert')
+    expect(soundOf(undefined)).toBe('alert')
+    expect(soundOf('trumpet')).toBe('alert')
+    expect(soundOf(true)).toBe('alert')
+  })
+
+  test('by default a new question plays the macOS alert once', async ($, on) => {
+    const { plays, alerts } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(alerts).toEqual([ALERT])
+    expect(plays).toEqual([])
+  })
+
+  test('the ding option plays the built-in WAV and no alert', { options: { sound: 'ding' } }, async ($, on) => {
+    const { plays, alerts } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'one' })
     expect(plays).toEqual([ACK_SOUND])
+    expect(alerts).toEqual([])
+  })
+
+  test('the off option plays nothing', { options: { sound: 'off' } }, async ($, on) => {
+    const { plays, alerts } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(plays).toEqual([])
+    expect(alerts).toEqual([])
   })
 
   test('restoring stored questions plays no sound', async ($, on) => {
-    const { plays } = engine(on, { 'open:session-1': [question(1, new Date().toISOString())], 'seq:session-1': 1 })
+    const { plays, alerts } = engine(on, { 'open:session-1': [question(1, new Date().toISOString())], 'seq:session-1': 1 })
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     const ui = await $.ui.mount(PANE)
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
-    expect(plays).toEqual([])
+    expect([...plays, ...alerts]).toEqual([])
     await ui.unmount()
   })
 
   test('closing or answering a question plays no sound', async ($, on) => {
-    const { plays } = engine(on)
+    const { alerts, clock } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'one' })
     await $.tool.call({ tool: OPEN, question: 'two' })
-    const before = plays.length
+    await clock.advance(5_000)
+    const before = alerts.length
     await $.tool.call({ tool: CLOSE, n: 1 })
     await $.prompt.submit({ text: '[Q2 · asked 2026-11-11 10:42] ok', wait: false, origin: { kind: 'composer' } })
-    expect(plays).toHaveLength(before)
+    expect(alerts).toHaveLength(before)
   })
 
   test('a question from a subagent plays no sound', async ($, on) => {
-    const { plays } = engine(on)
+    const { plays, alerts } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'mine', agentId: 'impl-1' })
-    expect(plays).toEqual([])
+    expect([...plays, ...alerts]).toEqual([])
   })
 
   test('an empty question plays no sound', async ($, on) => {
-    const { plays } = engine(on)
+    const { plays, alerts } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: '   ' })
-    expect(plays).toEqual([])
+    expect([...plays, ...alerts]).toEqual([])
   })
 
-  test('questions less than a second apart play one sound', async ($, on) => {
+  test('alerts less than a second apart play once', async ($, on) => {
+    const { alerts, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(500)
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(alerts).toHaveLength(1)
+  })
+
+  test('an alert more than a second after the last one plays again', async ($, on) => {
+    const { alerts, clock } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await clock.advance(1_001)
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    expect(alerts).toHaveLength(2)
+  })
+
+  test('dings less than a second apart play once', { options: { sound: 'ding' } }, async ($, on) => {
     const { plays, clock } = engine(on)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     await $.tool.call({ tool: OPEN, question: 'one' })
     await clock.advance(500)
     await $.tool.call({ tool: OPEN, question: 'two' })
     expect(plays).toHaveLength(1)
-  })
-
-  test('a question more than a second after the last sound plays again', async ($, on) => {
-    const { plays, clock } = engine(on)
-    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: OPEN, question: 'one' })
-    await clock.advance(1_001)
-    await $.tool.call({ tool: OPEN, question: 'two' })
-    expect(plays).toHaveLength(2)
   })
 
   test('a player that throws at once is logged and does not throw', async () => {
@@ -485,26 +547,58 @@ describe('sound', () => {
       },
       ui: { log: (text: string) => void logged.push(text) },
     }
-    await ding($ as never)
+    await chime($ as never, 'ding')
     await Promise.resolve()
     await Promise.resolve()
     expect(logged).toHaveLength(1)
     expect(logged[0]).toMatch(/no audio noun/)
   })
 
-  test('a sound that cannot play still registers the question', async ($, on) => {
-    const { plays } = engine(on, {}, 'main\n', true)
+  test('an alert that throws at once is logged and does not throw', async () => {
+    const logged: string[] = []
+    const $ = {
+      clock: { now: async () => 2e15 },
+      process: {
+        run: () => {
+          throw new Error('no process noun')
+        },
+      },
+      ui: { log: (text: string) => void logged.push(text) },
+    }
+    await chime($ as never, 'alert')
+    for (let i = 0; i < 10; i++) await Promise.resolve()
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toMatch(/no process noun/)
+  })
+
+  test('a ding that cannot play still registers the question', { options: { sound: 'ding' } }, async ($, on) => {
+    const { plays, logs, clock } = engine(on, {}, 'main\n', true)
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
     const opened = await $.tool.call({ tool: OPEN, question: 'one' })
     expect(String(opened.result)).toMatch(/^Registered as Q1,/)
     expect(plays).toHaveLength(1)
+    await clock.settle()
+    expect(logs.some(line => /sound did not play/.test(line))).toBe(true)
   })
 
-  test('the sound option turned off plays no sound', { options: { sound: false } }, async ($, on) => {
-    const { plays } = engine(on)
+  test('an alert that cannot start still registers the question', async ($, on) => {
+    const { alerts, logs, clock } = engine(on, {}, 'main\n', false, 'reject')
     await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
-    await $.tool.call({ tool: OPEN, question: 'one' })
-    expect(plays).toEqual([])
+    const opened = await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(String(opened.result)).toMatch(/^Registered as Q1,/)
+    expect(alerts).toHaveLength(1)
+    await clock.settle()
+    expect(logs.some(line => /sound did not play/.test(line))).toBe(true)
+  })
+
+  test('an alert that exits with an error is logged', async ($, on) => {
+    const { alerts, logs, clock } = engine(on, {}, 'main\n', false, 'exit')
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const opened = await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(String(opened.result)).toMatch(/^Registered as Q1,/)
+    expect(alerts).toHaveLength(1)
+    await clock.settle()
+    expect(logs.some(line => /exit code 1.*execution error/.test(line))).toBe(true)
   })
 })
 

@@ -17,10 +17,15 @@
   ],
   "userConfig": {
     "sound": {
-      "type": "boolean",
+      "type": "string",
       "title": "Sound on new questions",
-      "description": "Play a short ding when the agent registers a new pending question (macOS only, through afplay).",
-      "default": true
+      "description": "What plays when the agent registers a new pending question, on macOS: alert, the macOS alert sound; ding, a short built-in tone; off, nothing.",
+      "options": [
+        "alert",
+        "ding",
+        "off"
+      ],
+      "default": "alert"
     }
   }
 }
