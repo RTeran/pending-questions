@@ -80,6 +80,74 @@ export const answeredRef = (text: string) => {
 
 export const optionTextOf = (o: Option) => `${o.key}: ${o.label}`
 
+const lineRows = (line: string, columns: number) => {
+  let rows = 1
+  let used = 0
+  for (const word of line.split(' ')) {
+    const length = [...word].length
+    const needed = used === 0 ? length : used + 1 + length
+    if (needed <= columns) {
+      used = needed
+      continue
+    }
+    if (used > 0) rows++
+    rows += Math.max(0, Math.ceil(length / columns) - 1)
+    used = length % columns || (length === 0 ? 0 : columns)
+  }
+  return rows
+}
+
+export const rowsOf = (text: string, columns: number) =>
+  text.split('\n').reduce((sum, line) => sum + lineRows(line, Math.max(1, columns)), 0)
+
+const stackRows = (children: readonly number[]) =>
+  children.length === 0 ? 0 : children.reduce((sum, rows) => sum + rows, 0) + children.length - 1
+
+const listHeaderOf = (q: Question, at: Date) =>
+  `Q${q.n} · ${clockOf(q.askedAt)} · ${ageOf(q.askedAt, at)}${q.queuedAt ? ' · ⏳ queued' : ''}`
+
+export const listRows = (list: readonly Question[], at: Date, columns: number) => {
+  const showDays = spansDays(list, at)
+  return stackRows(
+    groupByDay(list, at).map(group =>
+      stackRows([
+        ...(showDays ? [rowsOf(`── ${group.label} ──`, columns)] : []),
+        ...group.items.map(q => rowsOf(listHeaderOf(q, at), columns) + rowsOf(q.question, columns)),
+      ]),
+    ),
+  )
+}
+
+const ANSWER_FIELD_ROWS = 4
+
+const sentLineOf = (queuedAt: string) => `⏳ Sent at ${clockOf(queuedAt)}: it arrives when the lead ends its turn.`
+
+export const detailRows = (q: Question, at: Date, columns: number) =>
+  stackRows([
+    1,
+    rowsOf(`Q${q.n} · asked ${stampOf(q.askedAt)} · ${ageOf(q.askedAt, at)}`, columns) + rowsOf(q.question, columns),
+    ...(q.context !== '' ? [rowsOf(q.context, columns)] : []),
+    ...(q.options.length > 0
+      ? [
+          q.options.reduce(
+            (sum, o) => sum + rowsOf(`○ ${optionTextOf(o)}${o.key === q.recommended ? ' (recommended)' : ''}`, columns),
+            0,
+          ),
+        ]
+      : []),
+    q.queuedAt ? rowsOf(sentLineOf(q.queuedAt), columns) : ANSWER_FIELD_ROWS + 1,
+  ])
+
+export type Thumb = { start: number; size: number }
+
+export const thumbOf = ({ offset, bodyRows, contentRows }: { offset: number; bodyRows: number; contentRows: number }) => {
+  if (bodyRows <= 0 || contentRows <= bodyRows) return undefined
+  const size = Math.max(1, Math.round((bodyRows * bodyRows) / contentRows))
+  const travel = bodyRows - size
+  const ratio = Math.min(1, Math.max(0, offset / (contentRows - bodyRows)))
+  return { start: Math.round(ratio * travel), size } satisfies Thumb
+}
+
 const ANSWER_ORIGINS = new Set(['composer', 'bridge', 'plugin'])
 
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'

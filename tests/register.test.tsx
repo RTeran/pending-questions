@@ -1,7 +1,17 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { answeredRef, answerTextOf, dayLabelOf, groupByDay, spansDays } from '../hooks/register'
+import {
+  answeredRef,
+  answerTextOf,
+  dayLabelOf,
+  detailRows,
+  groupByDay,
+  listRows,
+  rowsOf,
+  spansDays,
+  thumbOf,
+} from '../hooks/register'
 import type { Question } from '../types'
 
 const OPEN = 'mcp__pending-questions__question_open'
@@ -226,4 +236,48 @@ test('a picked option stays marked until the answer changes or another is picked
   await ui.input({ key: 'answer-1', text: 'B: No, but later', kind: 'change' })
   expect(await ui.find({ type: 'Text', text: /^● / })).toBeUndefined()
   await ui.unmount()
+})
+
+describe('scrollbar helpers', () => {
+  test('there is no thumb while the content fits', async () => {
+    expect(thumbOf({ offset: 0, bodyRows: 10, contentRows: 10 })).toBeUndefined()
+    expect(thumbOf({ offset: 0, bodyRows: 10, contentRows: 4 })).toBeUndefined()
+  })
+
+  test('the thumb is as long as the share of the content that shows', async () => {
+    expect(thumbOf({ offset: 0, bodyRows: 10, contentRows: 20 })).toEqual({ start: 0, size: 5 })
+    expect(thumbOf({ offset: 0, bodyRows: 5, contentRows: 200 })).toEqual({ start: 0, size: 1 })
+  })
+
+  test('the thumb moves from the top to the bottom of the track', async () => {
+    expect(thumbOf({ offset: 5, bodyRows: 10, contentRows: 20 })).toEqual({ start: 3, size: 5 })
+    expect(thumbOf({ offset: 10, bodyRows: 10, contentRows: 20 })).toEqual({ start: 5, size: 5 })
+    expect(thumbOf({ offset: 15, bodyRows: 5, contentRows: 20 })).toEqual({ start: 4, size: 1 })
+    expect(thumbOf({ offset: 99, bodyRows: 5, contentRows: 20 })).toEqual({ start: 4, size: 1 })
+  })
+
+  test('text wraps at word boundaries and breaks words longer than a row', async () => {
+    expect(rowsOf('', 10)).toBe(1)
+    expect(rowsOf('short', 10)).toBe(1)
+    expect(rowsOf('one two three', 7)).toBe(2)
+    expect(rowsOf('one\ntwo', 10)).toBe(2)
+    expect(rowsOf('abcdefghijkl', 5)).toBe(3)
+  })
+
+  test('the list height counts each question, its header and the gaps between them', async () => {
+    const at = new Date(2026, 10, 11, 12, 0)
+    const asked = new Date(2026, 10, 11, 11, 0).toISOString()
+    expect(listRows([question(1, asked)], at, 60)).toBe(2)
+    expect(listRows([question(1, asked), question(2, asked)], at, 60)).toBe(5)
+    const yesterday = new Date(2026, 10, 10, 11, 0).toISOString()
+    expect(listRows([question(1, yesterday), question(2, asked)], at, 60)).toBe(9)
+  })
+
+  test('the detail height grows with the context and the options', async () => {
+    const at = new Date(2026, 10, 11, 12, 0)
+    const q = question(1, new Date(2026, 10, 11, 11, 0).toISOString())
+    const bare = detailRows(q, at, 60)
+    expect(detailRows({ ...q, context: 'word '.repeat(60).trim() }, at, 60)).toBe(bare + 1 + 5)
+    expect(detailRows({ ...q, options: [{ key: 'A', label: 'Yes' }, { key: 'B', label: 'No' }] }, at, 60)).toBe(bare + 1 + 2)
+  })
 })
