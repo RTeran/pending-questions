@@ -993,6 +993,13 @@ describe('tasks setup', () => {
     await ui.unmount()
   })
 
+  test('a session nobody can answer gets no setup card', async ($, on) => {
+    const { alerts, opened } = engine(on, {}, 'main\n', false, 'ok', {})
+    await $.session.start({ ...START, isInteractive: false })
+    expect(alerts).toEqual([])
+    expect(opened).toEqual([])
+  })
+
   test('using a path stores it for the project and shows that file', async ($, on) => {
     const { fs } = engine(on, {}, 'main\n', false, 'ok', {})
     fs.write('/repo/docs/todo.md', TASKS)
@@ -1083,7 +1090,7 @@ describe('tasks notifications', () => {
   })
 
   test('a restart on an unchanged file is silent', async ($, on) => {
-    const seen = { hash: hashOf(normalize(TASKS)), text: normalize(TASKS) }
+    const seen = { path: '/repo/TASKS.md', hash: hashOf(normalize(TASKS)), text: normalize(TASKS) }
     const { clock, alerts } = engine(on, { 'tasksSeen:/repo': seen })
     await $.session.start(START)
     await clock.advance(15_000)
@@ -1092,11 +1099,33 @@ describe('tasks notifications', () => {
 
   test('a restart after the file changed notifies what changed', async ($, on) => {
     const before = '# Tasks\n- [ ] one\n'
-    const { clock, alerts, toasts } = engine(on, { 'tasksSeen:/repo': { hash: hashOf(before), text: before } })
+    const { clock, alerts, toasts } = engine(on, { 'tasksSeen:/repo': { path: '/repo/TASKS.md', hash: hashOf(before), text: before } })
     await $.session.start(START)
     await clock.advance(5_000)
     expect(alerts).toEqual([ALERT])
     expect(toasts).toContain('1 task added')
+  })
+
+  test('a restart whose stored baseline is of another file is silent', async ($, on) => {
+    const before = '# Tasks\n- [ ] one\n'
+    const { clock, toasts, opened } = engine(on, { 'tasksSeen:/repo': { path: '/repo/old.md', hash: hashOf(before), text: before } })
+    await $.session.start(START)
+    await clock.advance(15_000)
+    expect(toasts.filter(text => /task|section/.test(text))).toEqual([])
+    expect(opened).toEqual([])
+  })
+
+  test('switching to a file that already has tasks is silent', async ($, on) => {
+    const { fs, clock, toasts, opened } = engine(on, {}, 'main\n', false, 'ok', {})
+    fs.write('/repo/docs/todo.md', TASKS)
+    await $.session.start(START)
+    const ui = await $.ui.mount(PANE)
+    await ui.input({ key: 'tasks-path', text: 'docs/todo.md', kind: 'change' })
+    await ui.press({ key: 'tasks-use' })
+    await clock.advance(15_000)
+    expect(toasts.filter(text => /added|section/.test(text))).toEqual([])
+    expect(opened).toHaveLength(1)
+    await ui.unmount()
   })
 
   test('the tasks sound has its own gap and does not hold back a question', async ($, on) => {

@@ -487,8 +487,12 @@ const STABLE_POLLS = 2
 
 type Snapshot = { hash: string; text: string }
 
-const isSnapshot = (value: unknown): value is Snapshot =>
-  typeof (value as Snapshot | undefined)?.hash === 'string' && typeof (value as Snapshot | undefined)?.text === 'string'
+type Seen = Snapshot & { path: string }
+
+const isSeenFor = (value: unknown, path: string): value is Seen =>
+  (value as Seen | undefined)?.path === path &&
+  typeof (value as Seen).hash === 'string' &&
+  typeof (value as Seen).text === 'string'
 
 export const tasksInstructionOf = (path: string) =>
   `Keep your task list in ${path}, using \`- [ ]\` / \`- [x]\` checkboxes.`
@@ -531,7 +535,7 @@ async function readTasks($: Engine) {
 async function commit($: Engine, next: Snapshot) {
   committed = next
   pending = { hash: '', count: 0 }
-  await $.store.set(`tasksSeen:${tasksRoot}`, next)
+  await $.store.set(`tasksSeen:${tasksRoot}`, { path: tasksPath, ...next } satisfies Seen)
 }
 
 async function notifyTasks($: Engine, sound: Sound, text: string) {
@@ -594,7 +598,7 @@ async function useTasksPath($: Engine, sound: Sound, path: string) {
   committed = undefined
   pending = { hash: '', count: 0 }
   const seen = await $.store.get(`tasksSeen:${tasksRoot}`)
-  if (isSnapshot(seen)) committed = seen
+  if (isSeenFor(seen, path)) committed = { hash: seen.hash, text: seen.text }
   await update($, tasks, t => ({ ...t, path, draft: path }))
   await observe($, sound, true)
 }
@@ -721,7 +725,7 @@ export const register: Register = (on, options) => {
     const path = typeof storedPath === 'string' && storedPath !== '' ? storedPath : optionPath !== '' ? optionPath : 'TASKS.md'
     await useTasksPath($, sound, absoluteOf(path, tasksRoot))
     const source = await read($, tasks)
-    if (!source.exists && !source.isDismissed && !source.isSetupAsked) {
+    if (e.isInteractive && !source.exists && !source.isDismissed && !source.isSetupAsked) {
       await update($, tasks, t => ({ ...t, isSetupAsked: true }))
       await update($, view, () => ({ kind: 'tasks-setup' }) as View)
       await chime($, sound, 'tasks')
