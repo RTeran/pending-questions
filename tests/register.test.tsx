@@ -133,7 +133,12 @@ test('/questions opens the pane', async ($, on) => {
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(commands).toEqual(['questions'])
 
-  const ran = await $.command.run({ command: 'questions' })
+  const ran = await $.command.run({
+    command: 'questions',
+    args: '',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false },
+  } as never)
   expect(ran.text).toBe('No pending questions.')
 })
 
