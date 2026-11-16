@@ -174,6 +174,51 @@ export const optionsOf = (raw: unknown): Option[] =>
 const isQuestionList = (value: unknown): value is Question[] =>
   Array.isArray(value) && value.every(q => typeof q?.n === 'number' && typeof q?.question === 'string' && typeof q?.askedAt === 'string')
 
+const SAMPLE_RATE = 22_050
+
+const wavOf = (samples: Float32Array) => {
+  const bytes = new Uint8Array(44 + samples.length * 2)
+  const data = new DataView(bytes.buffer)
+  const text = (at: number, value: string) => [...value].forEach((c, i) => data.setUint8(at + i, c.charCodeAt(0)))
+  text(0, 'RIFF')
+  data.setUint32(4, 36 + samples.length * 2, true)
+  text(8, 'WAVE')
+  text(12, 'fmt ')
+  data.setUint32(16, 16, true)
+  data.setUint16(20, 1, true)
+  data.setUint16(22, 1, true)
+  data.setUint32(24, SAMPLE_RATE, true)
+  data.setUint32(28, SAMPLE_RATE * 2, true)
+  data.setUint16(32, 2, true)
+  data.setUint16(34, 16, true)
+  text(36, 'data')
+  data.setUint32(40, samples.length * 2, true)
+  samples.forEach((v, i) => data.setInt16(44 + i * 2, Math.round(Math.max(-1, Math.min(1, v)) * 32_767), true))
+  let binary = ''
+  for (const b of bytes) binary += String.fromCharCode(b)
+  return btoa(binary)
+}
+
+const dingOf = (seconds: number, hz: number) =>
+  Float32Array.from({ length: Math.round(SAMPLE_RATE * seconds) }, (_, i) => {
+    const t = i / SAMPLE_RATE
+    const attack = Math.min(1, t / 0.005)
+    const tone = Math.sin(2 * Math.PI * hz * t) + 0.35 * Math.sin(4 * Math.PI * hz * t)
+    return 0.4 * attack * Math.exp(-t * 14) * tone
+  })
+
+export const ACK_SOUND = { base64: wavOf(dingOf(0.35, 1_320)), mime: 'audio/wav' } as const
+
+const SOUND_GAP_MS = 1_000
+let lastSoundAt = -Infinity
+
+function ding($: Engine) {
+  const at = Date.now()
+  if (at - lastSoundAt < SOUND_GAP_MS) return
+  lastSoundAt = at
+  void $.audio.play(ACK_SOUND).catch(() => {})
+}
+
 type OpenInput = { question?: unknown; context?: unknown; options?: unknown; recommended?: unknown }
 type CloseInput = { n?: unknown; reason?: unknown }
 
@@ -253,7 +298,9 @@ export async function isTeammateProcess($: Engine) {
   }
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isSoundOn = options.sound !== false
+
   on('session.start', async ($, e, next) => {
     if (await isTeammateProcess($)) return next(e)
 
@@ -357,6 +404,7 @@ export const register: Register = on => {
     }
     await update($, questions, all => [...all, entry])
     await save($)
+    if (isSoundOn) ding($)
     void $.ui.open({ id: PANE, title: TITLE })
 
     return {

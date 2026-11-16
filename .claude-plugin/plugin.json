@@ -14,5 +14,13 @@
     "questions",
     "agent-teams",
     "pane"
-  ]
+  ],
+  "userConfig": {
+    "sound": {
+      "type": "boolean",
+      "title": "Sound on new questions",
+      "description": "Play a short ding when the agent registers a new pending question (macOS only, through afplay).",
+      "default": true
+    }
+  }
 }

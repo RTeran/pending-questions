@@ -2,6 +2,7 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import {
+  ACK_SOUND,
   answeredRef,
   answerTextOf,
   dayLabelOf,
@@ -32,8 +33,14 @@ const PANE = {
   },
 } as const
 
-const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') => {
+const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n', playFails = false) => {
   const submitted: string[] = []
+  const plays: unknown[] = []
+  on('audio.play', (_, e) => {
+    plays.push(e.clip)
+    if (playFails) throw new Error('no audio device')
+    return { value: undefined }
+  })
   const tools: string[] = []
   const commands: string[] = []
   on('process.run', () => ({
@@ -60,7 +67,7 @@ const engine = (on: On, stored: Record<string, unknown> = {}, probe = 'main\n') 
     submitted.push(e.text)
     return { text: e.text }
   })
-  return { submitted, clock, tools, commands }
+  return { submitted, clock, tools, commands, plays }
 }
 
 const question = (n: number, askedAt: string): Question => ({ n, question: `q${n}`, context: '', options: [], askedAt })
@@ -371,5 +378,65 @@ describe('scrollbar', () => {
     const ui = await $.ui.mount(sized(1))
     expect(await ui.find({ type: 'Box', key: 'scrollbar' })).toBeUndefined()
     await ui.unmount()
+  })
+})
+
+describe('sound', () => {
+  test('the sound is a short WAV built in code', async () => {
+    expect(ACK_SOUND.mime).toBe('audio/wav')
+    const bytes = atob(ACK_SOUND.base64)
+    expect(bytes.slice(0, 4)).toBe('RIFF')
+    expect(bytes.slice(8, 12)).toBe('WAVE')
+    expect(bytes.length).toBeLessThan(40_000)
+  })
+
+  test('a new question plays the sound once', async ($, on) => {
+    const { plays } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(plays).toEqual([ACK_SOUND])
+  })
+
+  test('restoring stored questions plays no sound', async ($, on) => {
+    const { plays } = engine(on, { 'open:session-1': [question(1, new Date().toISOString())], 'seq:session-1': 1 })
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
+    expect(plays).toEqual([])
+    await ui.unmount()
+  })
+
+  test('closing or answering a question plays no sound', async ($, on) => {
+    const { plays } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: OPEN, question: 'two' })
+    const before = plays.length
+    await $.tool.call({ tool: CLOSE, n: 1 })
+    await $.prompt.submit({ text: '[Q2 · asked 2026-11-11 10:42] ok', wait: false, origin: { kind: 'composer' } })
+    expect(plays).toHaveLength(before)
+  })
+
+  test('a denied question plays no sound', async ($, on) => {
+    const { plays } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'mine', agentId: 'impl-1' })
+    await $.tool.call({ tool: OPEN, question: '   ' })
+    expect(plays).toEqual([])
+  })
+
+  test('a sound that cannot play still registers the question', async ($, on) => {
+    const { plays } = engine(on, {}, 'main\n', true)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    const opened = await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(String(opened.result)).toMatch(/^Registered as Q1,/)
+    expect(plays).toHaveLength(1)
+  })
+
+  test('the sound option turned off plays no sound', { options: { sound: false } }, async ($, on) => {
+    const { plays } = engine(on)
+    await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    expect(plays).toEqual([])
   })
 })
