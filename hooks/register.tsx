@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface as Engine, Register, RenderNode } from 'claude-code'
 
-import type { Action, Option, Question, ScrollCache, TasksSource, View } from '../types'
+import type { Action, ChainState, Option, Question, ScrollCache, TasksSource, View } from '../types'
 
 const PANE = 'pending-questions'
 const TITLE = 'Pending questions'
@@ -382,34 +382,66 @@ type ActionOpenInput = { action?: unknown; context?: unknown; url?: unknown }
 
 // A /clear gives the process a new session id without a session.start. The store keys stay
 // on the id the chain started with, so open items and their numbering outlive the /clear.
-// An empty chain atom means $.state is new (a new process, or a /clear that dropped it):
-// the alias finds the chain again and the open items come back from the store.
-const chain = atom({ plugin: 'pending-questions', key: 'chain' } as const, '')
+// Any other id change (a /resume, or one no session.end announced) moves to that
+// conversation's own chain. The chain lives in $.state so a reload keeps it; when the state
+// is new, the alias finds the chain again and the open items come back from the store.
+const NO_CHAIN: ChainState = { id: '', seen: '', endReason: '' }
+const chain = atom({ plugin: 'pending-questions', key: 'chain' } as const, NO_CHAIN, { shape: 'chain-1' })
 let chainId = ''
 let seenId = ''
+let endReason = ''
+
+async function chainOf($: Engine, id: string) {
+  const alias = await $.store.get(`alias:${id}`)
+  return typeof alias === 'string' && alias !== '' ? alias : id
+}
 
 async function keysOf($: Engine) {
   const id = await $.session.id()
   const known = await read($, chain)
+  const isFresh = known.id === ''
   if (chainId === '') {
-    const alias = await $.store.get(`alias:${id}`)
-    chainId = known || (typeof alias === 'string' && alias !== '' ? alias : id)
+    chainId = known.id
+    seenId = known.seen
+    endReason = endReason || known.endReason
   }
+  let isMoved = false
+  let isChanged = isFresh
+  if (chainId === '') {
+    chainId = await chainOf($, id)
+    seenId = id
+  } else if (id !== seenId) {
+    if (endReason === 'clear') await $.store.set(`alias:${id}`, chainId)
+    else {
+      chainId = await chainOf($, id)
+      isMoved = true
+    }
+    seenId = id
+    endReason = ''
+    isChanged = true
+  }
+  if (isChanged) await update($, chain, () => ({ id: chainId, seen: seenId, endReason }))
   const keys = {
     open: `open:${chainId}`,
     seq: `seq:${chainId}`,
     actions: `actions:${chainId}`,
     actionSeq: `aseq:${chainId}`,
   }
-  if (id !== seenId) {
-    seenId = id
-    if (id !== chainId) await $.store.set(`alias:${id}`, chainId)
-  }
-  if (known === '') {
-    await update($, chain, () => chainId)
-    await restoreLists($, keys)
-  }
+  if (isMoved) await replaceLists($, keys)
+  else if (isFresh) await restoreLists($, keys)
   return keys
+}
+
+async function noteSessionEnd($: Engine, reason: string) {
+  endReason = reason
+  await update($, chain, c => ({ ...c, endReason: reason }))
+}
+
+async function replaceLists($: Engine, keys: { open: string; actions: string }) {
+  await update($, questions, () => [])
+  await update($, actions, () => [])
+  await update($, view, () => LIST)
+  await restoreLists($, keys)
 }
 
 async function restoreLists($: Engine, keys: { open: string; actions: string }) {
@@ -823,6 +855,7 @@ export const register: Register = (on, options) => {
 
     chainId = ''
     seenId = ''
+    endReason = ''
     await keysOf($)
 
     await $.tool.register({
@@ -942,6 +975,13 @@ export const register: Register = (on, options) => {
   })
 
   on('session.end', async ($, e, next) => {
+    if (isLead) {
+      try {
+        await noteSessionEnd($, e.reason)
+      } catch (error) {
+        logDebug($, `the end of the session could not be noted: ${String(error)}`)
+      }
+    }
     const result = await next(e)
     if (e.reason !== 'clear' && e.reason !== 'resume') {
       polling?.cancel()

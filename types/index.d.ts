@@ -32,6 +32,8 @@ export type TasksSource = {
   isUnseen: boolean
 }
 
+export type ChainState = { id: string; seen: string; endReason: string }
+
 export type View =
   | { kind: 'list' }
   | { kind: 'question'; n: number }
@@ -48,7 +50,7 @@ declare module 'claude-code' {
       questions: Shaped<Question[]>
       actions: Shaped<Action[]>
       tasks: Shaped<TasksSource>
-      chain: string
+      chain: Shaped<ChainState>
       view: Shaped<View>
       now: string
       scroll: Shaped<ScrollCache>

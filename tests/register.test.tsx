@@ -1372,6 +1372,7 @@ describe('a /clear', () => {
     await $.tool.call({ tool: OPEN, question: 'two' })
     await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
 
+    await $.session.end({ reason: 'clear', sessionId: 'session-1' } as never)
     control.clear('session-2')
     expect(String((await $.tool.call({ tool: OPEN, question: 'three' })).result)).toMatch(/^Registered as Q3,/)
     expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'test it' })).result)).toMatch(/^Registered as A2,/)
@@ -1425,6 +1426,7 @@ describe('a /clear', () => {
     await $.tool.call({ tool: OPEN, question: 'one' })
     await $.tool.call({ tool: OPEN, question: 'two' })
 
+    await $.session.end({ reason: 'clear', sessionId: 'session-1' } as never)
     control.clear('session-2')
     for (const key of ['questions', 'actions', 'chain']) lost.set(key, { value: undefined, version: 0 })
     await $.prompt.submit(answer('[Q2 · asked 2026-11-11 10:42] ok'))
@@ -1434,6 +1436,49 @@ describe('a /clear', () => {
     expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'q-2' })).toBeUndefined()
     await ui.unmount()
+  })
+
+  test('a /resume to another conversation shows only that conversation', async ($, on) => {
+    const { control, store } = engine(on, {
+      'open:session-9': [question(5, new Date().toISOString())],
+      'seq:session-9': 5,
+      'aseq:session-9': 2,
+    })
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.tool.call({ tool: ACTION_OPEN, action: 'merge it' })
+
+    await $.session.end({ reason: 'resume', sessionId: 'session-1' } as never)
+    control.clear('session-9')
+    expect(String((await $.tool.call({ tool: OPEN, question: 'next' })).result)).toMatch(/^Registered as Q6,/)
+    expect(String((await $.tool.call({ tool: ACTION_OPEN, action: 'next' })).result)).toMatch(/^Registered as A3,/)
+    expect(store.has('alias:session-9')).toBe(false)
+    expect(store.get('open:session-1')).toMatchObject([{ n: 1 }])
+
+    const ui = await $.ui.mount(PANE)
+    expect(await ui.find({ type: 'Button', key: 'q-1' })).toBeUndefined()
+    expect(await ui.find({ type: 'Button', key: 'q-5' })).toBeDefined()
+    await ui.unmount()
+  })
+
+  test('an id change with no session.end is not taken for a /clear', async ($, on) => {
+    const { control, store } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    control.clear('session-3')
+    expect(String((await $.tool.call({ tool: OPEN, question: 'two' })).result)).toMatch(/^Registered as Q1,/)
+    expect(store.has('alias:session-3')).toBe(false)
+  })
+
+  test('a reload between a /clear and the next item still keeps the chain', async ($, on) => {
+    const { control } = engine(on)
+    await $.session.start(START)
+    await $.tool.call({ tool: OPEN, question: 'one' })
+    await $.session.end({ reason: 'clear', sessionId: 'session-1' } as never)
+    await $.session.start(START)
+    control.clear('session-2')
+    await $.session.start(START)
+    expect(String((await $.tool.call({ tool: OPEN, question: 'two' })).result)).toMatch(/^Registered as Q2,/)
   })
 
   test('a reload whose state was lost finds the numbering through the alias', async ($, on) => {
